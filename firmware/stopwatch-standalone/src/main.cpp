@@ -30,6 +30,9 @@ uint32_t vibrationEndsAt = 0;
 uint32_t manualTestEndsAt = 0;
 uint32_t automaticCueEndsAt = 0;
 bool manualTestLatched = false;
+bool textView = false;
+bool buttonChord = false;
+bool buttonChordLong = false;
 String nmeaLine;
 int64_t utcAtRmc = 0;
 uint32_t msAtRmc = 0;
@@ -300,9 +303,9 @@ void parse(uint8_t value) {
   }
 }
 
-void drawBody(const String& text, int center, int top, int width) {
+void drawBody(const String& text, int center, int top, int width, int maxLines = 7, int lineHeight = 22) {
   String lines[7]; int row = 0;
-  for (int i = 0; i < text.length() && row < 7;) {
+  for (int i = 0; i < text.length() && row < maxLines;) {
     const uint8_t first = static_cast<uint8_t>(text[i]);
     if (first == '\r') { ++i; continue; }
     if (first == '\n') { ++i; ++row; continue; }
@@ -310,23 +313,43 @@ void drawBody(const String& text, int center, int top, int width) {
     if (i + n > text.length()) n = 1;
     const String character = text.substring(i, i + n); i += n;
     if (lines[row].length() && M5.Display.textWidth(lines[row] + character) > width)
-      if (++row >= 7) break;
+      if (++row >= maxLines) break;
     lines[row] += character;
   }
-  for (int j = 0; j <= row && j < 7; ++j)
-    M5.Display.drawCenterString(lines[j], center, top + j * 22);
+  for (int j = 0; j <= row && j < maxLines; ++j)
+    M5.Display.drawCenterString(lines[j], center, top + j * lineHeight);
 }
-void draw() {
+String receiverStatus() {
+  return !serialReady ? "CH340準備失敗" : !hostReady ?
+    "USBホスト開始失敗" : !ch340Seen ? "GNSS接続待ち" :
+    !lastByte || millis() - lastByte > 15000 ? "GNSS未受信" : "衛星データ受信中";
+}
+String notificationStatus() {
+  String status;
+  if (!alertStorageReady) status = "保存不可・通知無効";
+  else if (!validClock()) status = "通知: GNSS時刻待ち";
+  else if (!firstStableClockMs) status = "通知: 準備中";
+  else {
+    const uint32_t elapsed = millis() - firstStableClockMs;
+    status = elapsed < 60000 ?
+      "通知: 準備中 あと" + String((60000 - elapsed + 999) / 1000) + "秒" :
+      "自動通知待機";
+  }
+  if (automaticCueEndsAt && static_cast<int32_t>(automaticCueEndsAt - millis()) > 0)
+    status = "新規通報通知";
+  if (manualTestEndsAt && static_cast<int32_t>(manualTestEndsAt - millis()) > 0)
+    status = "手動通知テスト";
+  return status;
+}
+void drawTextView() {
   const int center = M5.Display.width() / 2;
   M5.Display.fillScreen(TFT_BLACK);
   M5.Display.setTextColor(TFT_WHITE, TFT_BLACK);
   M5.Display.setFont(&fonts::efontJA_16);
+  M5.Display.setTextSize(1);
   M5.Display.drawCenterString("QZSS 災危ウォッチ", center, 50);
   M5.Display.drawCenterString("研究・実験用", center, 76);
-  const String status = !serialReady ? "CH340準備失敗" : !hostReady ?
-    "USBホスト開始失敗" : !ch340Seen ? "GNSS接続待ち" :
-    !lastByte || millis() - lastByte > 15000 ? "GNSS未受信" : "衛星データ受信中";
-  M5.Display.drawCenterString(status, center, 105);
+  M5.Display.drawCenterString(receiverStatus(), center, 105);
   if (!count) M5.Display.drawCenterString("通報を待っています", center, 210);
   else {
     const Entry& entry = history[selected];
@@ -339,21 +362,49 @@ void draw() {
   }
   M5.Display.drawCenterString("受信 " + String(bytesSeen) + "B  L1S " +
                               String(l1sSeen), center, 411);
-  String notificationStatus;
-  if (!alertStorageReady) notificationStatus = "保存不可・通知無効";
-  else if (!validClock()) notificationStatus = "通知: GNSS時刻待ち";
-  else if (!firstStableClockMs) notificationStatus = "通知: 準備中";
-  else {
-    const uint32_t elapsed = millis() - firstStableClockMs;
-    notificationStatus = elapsed < 60000 ?
-      "通知: 準備中 あと" + String((60000 - elapsed + 999) / 1000) + "秒" :
-      "自動通知待機";
+  M5.Display.drawCenterString(notificationStatus(), center, 438);
+}
+void drawOverview() {
+  const int center = M5.Display.width() / 2;
+  M5.Display.fillScreen(TFT_BLACK);
+  M5.Display.setFont(&fonts::efontJA_16);
+  M5.Display.setTextSize(1);
+  const String status = receiverStatus();
+  const bool connected = status == "衛星データ受信中";
+  M5.Display.fillRoundRect(68, 49, 332, 44, 18, connected ? 0x03E0 : 0x4208);
+  M5.Display.setTextColor(TFT_WHITE);
+  M5.Display.drawCenterString(status, center, 61);
+  if (!count) {
+    M5.Display.setTextSize(2);
+    M5.Display.drawCenterString("通報待ち", center, 175);
+    M5.Display.setTextSize(1);
+    M5.Display.drawCenterString("新しい通報はありません", center, 252);
+  } else {
+    const Entry& entry = history[selected];
+    const bool test = entry.badge.indexOf("訓練") >= 0 || entry.badge.indexOf("試験") >= 0;
+    const bool old = entry.ageStatus.indexOf("古い") >= 0;
+    const uint16_t accent = test ? 0xFD20 : old ? 0x8410 : 0x07FF;
+    M5.Display.fillRoundRect(55, 111, 358, 48, 16, accent);
+    M5.Display.setTextColor(TFT_BLACK);
+    M5.Display.drawCenterString(entry.badge, center, 125);
+    M5.Display.setTextColor(TFT_WHITE);
+    M5.Display.setTextSize(2);
+    drawBody(entry.title, center, 174, 350, 2, 38);
+    M5.Display.setTextSize(1);
+    M5.Display.drawCenterString(entry.ageStatus, center, 245);
+    M5.Display.drawFastHLine(80, 277, 308, 0x4208);
+    M5.Display.setTextSize(2);
+    drawBody(entry.body, center, 295, 350, 3, 42);
+    M5.Display.setTextSize(1);
+    M5.Display.drawCenterString(String(selected + 1) + "/" + String(count) +
+                                "  A:前 B:次", center, 405);
   }
-  if (automaticCueEndsAt && static_cast<int32_t>(automaticCueEndsAt - millis()) > 0)
-    notificationStatus = "新規通報通知";
-  if (manualTestEndsAt && static_cast<int32_t>(manualTestEndsAt - millis()) > 0)
-    notificationStatus = "手動通知テスト";
-  M5.Display.drawCenterString(notificationStatus, center, 438);
+  M5.Display.setTextSize(1);
+  M5.Display.setTextColor(TFT_WHITE);
+  M5.Display.drawCenterString(notificationStatus(), center, 433);
+}
+void draw() {
+  if (textView) drawTextView(); else drawOverview();
   dirty = false;
 }
 }
@@ -385,9 +436,16 @@ void loop() {
     M5.Power.setVibration(0);
     vibrationEndsAt = 0;
   }
-  if (M5.BtnA.pressedFor(1800) && M5.BtnB.pressedFor(1800)) {
-    if (!manualTestLatched) { startManualCue(); manualTestLatched = true; }
-  } else if (!M5.BtnA.isPressed() || !M5.BtnB.isPressed()) manualTestLatched = false;
+  if (M5.BtnA.isPressed() && M5.BtnB.isPressed()) buttonChord = true;
+  if (buttonChord && M5.BtnA.pressedFor(1800) && M5.BtnB.pressedFor(1800)) {
+    if (!manualTestLatched) {
+      startManualCue(); manualTestLatched = true; buttonChordLong = true;
+    }
+  }
+  if (buttonChord && !M5.BtnA.isPressed() && !M5.BtnB.isPressed()) {
+    if (!buttonChordLong) { textView = !textView; dirty = true; }
+    buttonChord = false; buttonChordLong = false; manualTestLatched = false;
+  }
   if (hostReady && gnss.connected()) {
     const uint32_t now = millis();
     if (!lastEnable || now - lastEnable >= 60000) {
@@ -400,8 +458,8 @@ void loop() {
       parse(static_cast<uint8_t>(value));
     }
   } else lastEnable = 0;
-  if (M5.BtnA.wasPressed() && count) { selected = (selected + count - 1) % count; dirty = true; }
-  if (M5.BtnB.wasPressed() && count) { selected = (selected + 1) % count; dirty = true; }
+  if (!buttonChord && M5.BtnA.wasPressed() && count) { selected = (selected + count - 1) % count; dirty = true; }
+  if (!buttonChord && M5.BtnB.wasPressed() && count) { selected = (selected + 1) % count; dirty = true; }
   if (dirty || millis() - lastDraw >= 1000) { draw(); lastDraw = millis(); }
   delay(1);
 }
