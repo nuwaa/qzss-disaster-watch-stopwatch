@@ -61,9 +61,12 @@ StopWatch の公式 Arduino/PlatformIO 構成に合わせ、M5Unified・M5GFX・
 
 1. 通常の PowerShell で `scripts/setup_watch.ps1` を実行し、Wi-Fi 名・パスワードを入力します。スクリプトの実行が無効な場合は、その PowerShell で `Set-ExecutionPolicy -Scope Process -ExecutionPolicy RemoteSigned -Force` を先に実行します。この設定は現在のセッションだけに適用されます。ランダムなトークンが自動生成されます。`secrets.h` と `work/watch-token.txt` は Git の対象外です。スクリプトを使わない場合は `firmware/stopwatch/include/secrets.example.h` を `secrets.h` にコピーして編集してください。
 2. `scripts/build_watch.ps1` でビルドします。Windows のコンパイラパスを短くするため、空いている Z:/Y:/X:/W: ドライブをビルド中だけ割り当て、終了時に解除します。ビルド結果は `work/watch-build.log` に保存されます。成功後に `scripts/upload_watch.ps1 -Port COM10` で StopWatch に書き込みます。ポート番号は接続時に確認してください。書き込みモードに入らない場合は M5Stack 公式手順のリセット操作を行ってください。
+
 3. シリアルモニタ（115200 bps）に表示される IP アドレスを確認します。PC と StopWatch を同じ Wi-Fi に接続します。
 4. PC の PowerShell で `$env:PYTHONUTF8='1'`、`$env:QZSS_WATCH_TOKEN=(Get-Content work/watch-token.txt -Raw)` を設定します。まず `.venv\Scripts\qzss-watch sample --device-url http://<IP>:8080/report` で「デモ・訓練」と表示されるか確認します。
 5. 実衛星の受信は `& .\scripts\run_live_watch.ps1 -Port COM11 -WatchIp <IP>`。5分で自動停止し、30秒ごとに進捗を表示します。受信ログは Git 管理対象外の `logs/` に保存されます。停止後、`python .\scripts\summarize_live.py` で通報種別・固有通報数・訓練フラグを確認できます。COM 番号と IP は実際の値を指定してください。
+
+ビルド・書き込みスクリプトは一時ドライブの解除時に `TEMP`、`TMP`、`PYTHONPATH`、`PLATFORMIO_CORE_DIR` を元に戻します。旧版を実行したPowerShellでGit Bashが「/tmpが見つからない」または解除済みの `Z:\work\tmp` を参照する場合は、`$env:TEMP = Join-Path $env:LOCALAPPDATA 'Temp'; $env:TMP = $env:TEMP` を実行するか、新しいPowerShellを開いてください。
 
 HTTP は同一 LAN 上の試験用です。トークンは平文で送られるため、信頼できるネットワークだけで使ってください。`watch.notification_eligible` は全件 `false` で、画面に表示されても警報音・振動は出しません。空の DCX はログに記録しますが StopWatch へは送りません。実受信でも、配信時刻と現在時刻の照合が済むまでは「現在有効な警報」と扱わないでください。
 

@@ -5,6 +5,10 @@ $drive = @('Z:', 'Y:', 'X:', 'W:') | Where-Object { -not (Test-Path ($_.ToString
 if (-not $drive) { throw 'No free drive letter for a short build path.' }
 & subst $drive $root
 if ($LASTEXITCODE -ne 0) { throw 'Unable to create temporary build drive.' }
+$previousEnv = @{}
+foreach ($name in @('PYTHONPATH', 'PLATFORMIO_CORE_DIR', 'TEMP', 'TMP')) {
+    $previousEnv[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
+}
 try {
     $env:PYTHONPATH = "$drive\work\pio"
     $env:PLATFORMIO_CORE_DIR = "$drive\work\pio-core"
@@ -21,4 +25,7 @@ try {
 finally {
     Set-Location $root
     & subst $drive /D | Out-Null
+    foreach ($name in $previousEnv.Keys) {
+        [Environment]::SetEnvironmentVariable($name, $previousEnv[$name], 'Process')
+    }
 }
