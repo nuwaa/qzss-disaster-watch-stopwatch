@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+logs/
+.env
+secrets.*
+work/
+firmware/stopwatch/include/secrets.h
+firmware/stopwatch/.pio/
+**/.pio/
+outputs/
+!firmware/stopwatch/include/secrets.example.h

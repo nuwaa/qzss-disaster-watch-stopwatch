@@ -95,4 +95,3 @@ Phase 3 の USB-C シリアル表示口を実装しました。接続構成と�
 - [Azarashi API/JSON](https://github.com/nbtk/azarashi/blob/main/docs/json.md)
 - [Prioris UBX-RXM-SFRBX 説明](https://prioris.jp/gnss/docs/processing/qzqsm/)
 - [M5Stack StopWatch](https://docs.m5stack.com/ja/core/StopWatch)
-

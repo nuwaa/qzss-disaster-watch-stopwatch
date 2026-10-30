@@ -1,0 +1,21 @@
+[Unit]
+Description=QZSS Disaster Watch USB bridge (experimental)
+After=multi-user.target
+
+[Service]
+Type=simple
+User=qzsswatch
+Group=qzsswatch
+SupplementaryGroups=dialout
+WorkingDirectory=/opt/qzss-watch
+EnvironmentFile=/etc/qzss-watch/bridge.env
+Environment=PYTHONUTF8=1
+ExecStart=/opt/qzss-watch/.venv/bin/python -m qzss_watch.standalone
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

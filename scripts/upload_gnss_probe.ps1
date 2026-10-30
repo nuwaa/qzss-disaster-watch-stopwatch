@@ -1,0 +1,30 @@
+param([string]$Port = 'COM10')
+$ErrorActionPreference = 'Stop'
+$root = Split-Path -Parent $PSScriptRoot
+Set-Location $root
+if (-not (Test-Path -LiteralPath 'firmware/stopwatch-gnss-probe/.pio/build/m5stack-stopwatch-gnss-probe/firmware.bin')) {
+    throw 'Run scripts/build_gnss_probe.ps1 first.'
+}
+python scripts/check_watch_port.py $Port
+if ($LASTEXITCODE -ne 0) { throw "Upload target $Port is not a connected StopWatch port." }
+$drive = @('Z:', 'Y:', 'X:', 'W:') | Where-Object { -not (Test-Path ($_.ToString() + '\')) } | Select-Object -First 1
+if (-not $drive) { throw 'No free drive letter for a short upload path.' }
+& subst $drive $root
+if ($LASTEXITCODE -ne 0) { throw 'Unable to create temporary upload drive.' }
+try {
+    $env:PYTHONPATH = "$drive\work\pio"
+    $env:PLATFORMIO_CORE_DIR = "$drive\work\pio-core"
+    $env:TEMP = "$drive\work\tmp"
+    $env:TMP = $env:TEMP
+    New-Item -ItemType Directory -Force $env:TEMP | Out-Null
+    $ErrorActionPreference = 'Continue'
+    python -m platformio run -d "$drive\firmware\stopwatch-gnss-probe" -t upload --upload-port $Port 2>&1 | Tee-Object -FilePath "$drive\work\gnss-probe-upload.log"
+    $uploadCode = $LASTEXITCODE
+    $ErrorActionPreference = 'Stop'
+    if ($uploadCode -ne 0) { throw "Upload failed with exit code $uploadCode" }
+    Write-Host 'GNSS probe upload complete.'
+}
+finally {
+    Set-Location $root
+    & subst $drive /D | Out-Null
+}
