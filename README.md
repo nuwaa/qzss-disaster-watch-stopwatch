@@ -9,8 +9,6 @@
 - `tests/`: フレーム処理の単体テスト
 - `firmware/stopwatch/`: Phase 2 表示用ファームウェア（PlatformIO）
 - `docs/phase3-usbc.md`: USB-C 接続の成立条件と検証手順
-- `src/qzss_watch/standalone.py`: PCなしのUSBホストブリッジ用常駐処理
-- `docs/phase3-pi-bridge.md`: Raspberry Pi 4への導入、給電、実機検証手順
 - `firmware/stopwatch-host-probe/`: StopWatch単体USBホスト化の列挙試験（通常版とは別）
 - `firmware/stopwatch-gnss-probe/`: CH340経由でGNSSのNMEA/UBX受信数を画面で確認する試験版
 - `firmware/stopwatch-standalone/`: USBホスト受信とDCR/DCX日本語表示のPCなし試作版（受信・本文表示・通知待機を実機確認済み）
@@ -98,7 +96,7 @@ HTTP は同一 LAN 上の試験用です。トークンは平文で送られる�
 
 - **まずPCをUSBホストとして接続。** COM10のStopWatchへ公開訓練サンプルを送り、`watch USB: stored`を確認しました。COM11のGNSSからの5分間でSFRBX 3014件、Azarashi復号143件を得て、StopWatchに「衛星受信」と日本語本文が表示されました。
 
-- **Raspberry Piブリッジ案を用意。** 自動再接続するサービスを実装しましたが、Raspberry Pi実機での動作・給電は未検証です。手順は[Piブリッジ](docs/phase3-pi-bridge.md)にあります。
+- **接続方式をStopWatchのUSBホストに決定。** 途中でRaspberry Piブリッジ案も作成しましたが、採用していません。以降の実機検証はStopWatch自身のUSBホスト方式で進めました。
 
 - **StopWatch自身のUSBホスト化を確認。** BSHM2U105C1PBK経由でGNSSのCH340（`1A86:7523`）を列挙しました。続くGNSS試験版で受信byte、UBX、SFRBX、QZSS L1Sの各件数が増加することを画面で確認しました。
 
@@ -115,7 +113,6 @@ HTTP は同一 LAN 上の試験用です。トークンは平文で送られる�
 - 新着DCRを受信したときの自動音・振動と、履歴の「衛星受信・通知済」表示
 - 再起動後の通知済みIDによる重複抑制
 - StopWatchに表示する日本語本文・DCX本文とAzarashiの復号結果の一致
-- Raspberry Piブリッジ案の実機動作と電源容量
 
 防災用の認証済み製品ではなく、研究・実験用です。
 

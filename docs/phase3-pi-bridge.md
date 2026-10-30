@@ -1,4 +1,6 @@
-# PCなしのUSB-C接続: Raspberry Pi 4ブリッジ案
+# 不採用の検討記録: Raspberry Pi 4ブリッジ案
+
+この案は採用していません。現在のPCなし構成はStopWatch自身をUSBホストにする方式です。実装と実機手順は[StopWatch USBホスト版](phase3-stopwatch-host.md)を参照してください。以下は当時の検討記録であり、今後の作業手順ではありません。
 
 ## BSHM2U105C1PBKについて
 
