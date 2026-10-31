@@ -10,6 +10,12 @@
 #ifndef QZSS_NOTIFICATION_TEST
 #define QZSS_NOTIFICATION_TEST 0
 #endif
+#ifndef QZSS_DECODER_TEST
+#define QZSS_DECODER_TEST 0
+#endif
+#if QZSS_DECODER_TEST
+#include "ash_fixture.h"
+#endif
 
 namespace {
 EspUsbHost usb;
@@ -582,12 +588,52 @@ void loopNotificationTest() {
   delay(1);
 }
 #endif
+#if QZSS_DECODER_TEST
+void drawDecoderTest() {
+  M5.Display.fillScreen(TFT_BLACK);
+  M5.Display.setFont(&fonts::efontJA_16);
+  M5.Display.setTextSize(1);
+  M5.Display.setTextColor(TFT_WHITE);
+  M5.Display.drawCenterString("保存ログ比較・試験", 234, 43);
+  M5.Display.drawCenterString("現在の衛星通報ではありません", 234, 69);
+  M5.Display.drawFastHLine(75, 101, 318, 0x8410);
+  if (!count) {
+    M5.Display.drawCenterString("復号できませんでした", 234, 190);
+    return;
+  }
+  M5.Display.drawCenterString(history[0].title, 234, 113);
+  int start = 0, row = 0;
+  const String& body = history[0].body;
+  while (start < body.length() && row < 10) {
+    int end = body.indexOf('\n', start);
+    if (end < 0) end = body.length();
+    String line = body.substring(start, end);
+    line.trim();
+    start = end + 1;
+    if (line.isEmpty()) continue;
+    while (line.length() && M5.Display.textWidth(line) > 380) {
+      int last = line.length() - 1;
+      while (last > 0 && (static_cast<uint8_t>(line[last]) & 0xc0) == 0x80) --last;
+      line.remove(last);
+    }
+    M5.Display.drawCenterString(line, 234, 145 + row * 24);
+    ++row;
+  }
+  M5.Display.drawCenterString("試験素材: 降灰 1件", 234, 423);
+}
+#endif
 }
 
 void setup() {
   M5.begin(M5.config());
   M5.Power.setVibration(0);
   M5.Speaker.setVolume(alertVolume);
+#if QZSS_DECODER_TEST
+  dcr.SetYear(2026); // Year of the saved frame, normally supplied by GNSS RMC.
+  for (uint8_t value : ashFixtureUbx) parse(value);
+  drawDecoderTest();
+  return;
+#endif
   initAlertStorage();
 #if QZSS_NOTIFICATION_TEST
   testStage = alertLedger.ids[0] == testMessageId ? 3 : 0;
@@ -612,6 +658,10 @@ void setup() {
   hostReady = serialReady && usb.begin();
 }
 void loop() {
+#if QZSS_DECODER_TEST
+  delay(100);
+  return;
+#endif
 #if QZSS_NOTIFICATION_TEST
   loopNotificationTest();
   return;

@@ -93,6 +93,16 @@ M5Unified 0.2.28のStopWatch実装に `M5.Power.setVibration(level)` と `M5.Spe
 
 ユーザーが実機で、訓練・古い通報・重複は無音、新着DCR模擬は1回の音と振動、再起動後の試験用IDは再通知なしと確認しました。その後、通常版を書き込み、GNSS受信画面への復帰を確認しました。これらは試験用NVS領域での結果であり、通常版の実受信における重複抑制は引き続き未確認です。
 
+### 保存ログによる本文照合ビルド
+
+`tests/fixtures/real_qzss_ash_fall.ubx` の実受信フレーム1件をファームウェアに同梱し、StopWatchの既存UBX→L1S→QZQSM経路へ入力する比較試験です。起動時に**「保存ログ比較・試験」「現在の衛星通報ではありません」**と表示します。USBホストのGNSS受信と自動通知は起動せず、NVSの通知履歴にも触れません。
+
+1. StopWatchをPCへ接続してCOM番号を確認します。`& .\scripts\build_standalone.ps1 -DecoderTest` でビルドし、成功後に `& .\scripts\upload_standalone.ps1 -Port COM10 -DecoderTest` で書き込みます。COM番号は実際の値に置き換えます。
+2. 画面の降灰通報について、**発表時刻 10月30日20時24分、火山名 桜島、日時 30日19時49分、基点から6時間、少量の降灰、鹿児島県東串良町**が読めるか確認します。これらは同じフレームをAzarashi 0.17.1で復号した値です。QZQSMとAzarashiでは見出しや語句が異なるため、本文全体の文字列一致ではなく、意味のある項目ごとに照合します。
+3. 試験後は `& .\scripts\build_standalone.ps1` と `& .\scripts\upload_standalone.ps1 -Port COM10` で通常版に戻し、GNSS受信画面への復帰を確認します。
+
+この比較ビルドは1件のDCR降灰フレームに限ります。DCX本文、他のDCR種別、現在の衛星受信時の表示を検証するものではありません。ビルド・実機表示はまだ未確認です。
+
 Azarashi復号ログから通知候補を独立に再点検するには `python scripts/audit_alert_candidates.py logs/live-usb-20261031-011346-reports.jsonl` を実行します。この実受信ログでは143件中、DCX 70件、発表から3分超のDCR 73件、候補0件でした。ログにはStopWatch内のRMC時刻安定判定、60秒準備状態、NVS履歴がないため、この監査が示すのは通知候補の上限です。新着通報の自動通知を実機で証明するものではありません。
 
 L1Sの取り出しとDCRのヘッダー項目は、`python scripts/audit_standalone_fields.py logs/live-usb-20261031-011346-raw.jsonl` でAzarashiと照合できます。保存済みの3014 UBXフレームからQZSS L1S 354件を取り出し、Azarashiが復号したDCR 73件でバージョン、通報区分、発表種別、月日・時分、訓練判定の不一致は0件でした。この監査はマイコン側と同じビット位置をPythonで再現して比較するもので、実機の日本語本文やDCX本文の一致を証明するものではありません。
