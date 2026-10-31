@@ -16,6 +16,7 @@
 - `firmware/stopwatch-standalone/`: USBホスト受信とDCR/DCX日本語表示のPCなし試作版（受信・本文表示・通知待機を実機確認済み）
 - `docs/phase3-stopwatch-host.md`: BSHM2U105C1PBKを使う列挙試験と復旧手順
 - `docs/official-mt44-test-20261103.md`: 2026年11月3日の公式MT44試験に向けた記録・実機確認・抽出手順
+- `docs/notification-policy.md`: 単体版で音・振動を出す条件、出さない条件、未対応の判定
 
 11月3日までは記録用ファームウェアで動作観察を続け、機能追加を原則保留します。当日午前にログをPCへ保存してから端末の記録領域をクリアする手順と、容量上限・未検証事項は[公式MT44試験の受信手順](docs/official-mt44-test-20261103.md#10月31日時点の運用判断)にまとめています。
 
