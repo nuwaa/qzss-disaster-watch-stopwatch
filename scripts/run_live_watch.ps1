@@ -1,6 +1,8 @@
 param(
     [string]$Port = 'COM11',
-    [string]$WatchIp = '192.168.103.155'
+    [Parameter(Mandatory = $true)]
+    [ValidateNotNullOrEmpty()]
+    [string]$WatchIp
 )
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
