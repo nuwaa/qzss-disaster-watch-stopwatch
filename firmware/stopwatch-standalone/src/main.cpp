@@ -303,12 +303,17 @@ void parse(uint8_t value) {
   }
 }
 
-void drawBody(const String& text, int center, int top, int width, int maxLines = 7, int lineHeight = 22) {
+void drawBody(const String& text, int center, int top, int width,
+              int maxLines = 7, int lineHeight = 22, bool compactBlankLines = false) {
   String lines[7]; int row = 0;
   for (int i = 0; i < text.length() && row < maxLines;) {
     const uint8_t first = static_cast<uint8_t>(text[i]);
     if (first == '\r') { ++i; continue; }
-    if (first == '\n') { ++i; ++row; continue; }
+    if (first == '\n') {
+      ++i;
+      if (!compactBlankLines || !lines[row].isEmpty()) ++row;
+      continue;
+    }
     int n = first < 0x80 ? 1 : first < 0xe0 ? 2 : first < 0xf0 ? 3 : 4;
     if (i + n > text.length()) n = 1;
     const String character = text.substring(i, i + n); i += n;
@@ -394,7 +399,7 @@ void drawOverview() {
     M5.Display.drawCenterString(entry.ageStatus, center, 208);
     M5.Display.drawFastHLine(80, 277, 308, 0x4208);
     M5.Display.setTextSize(2);
-    drawBody(entry.body, center, 295, 350, 3, 42);
+    drawBody(entry.body, center, 286, 350, 3, 34, true);
     M5.Display.setTextSize(1);
     M5.Display.drawCenterString(String(selected + 1) + "/" + String(count) +
                                 "  A:前 B:次", center, 405);
