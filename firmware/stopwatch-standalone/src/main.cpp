@@ -32,6 +32,7 @@ QZQSM dcr;
 DCXDecoder dcx;
 Preferences alertPrefs;
 Preferences evidencePrefs;
+Preferences settingsPrefs;
 struct AlertLedger {
   uint32_t version;
   uint32_t next;
@@ -59,7 +60,8 @@ bool evidenceAvailable = false;
 bool evidenceSaveFailed = false;
 bool evidenceReadFailed = false;
 struct Entry { uint64_t id; String badge, title, body, ageStatus; uint32_t receivedMs; };
-Entry history[8];
+constexpr int historyCapacity = 16;
+Entry history[historyCapacity];
 int count = 0, selected = 0;
 uint32_t bytesSeen = 0, l1sSeen = 0, crcFailures = 0;
 uint32_t lastDraw = 0, lastByte = 0, lastValidL1s = 0, lastEnable = 0;
@@ -68,7 +70,10 @@ uint32_t vibrationEndsAt = 0;
 uint32_t manualTestEndsAt = 0;
 uint32_t automaticCueEndsAt = 0;
 bool manualTestLatched = false;
-uint8_t viewMode = 0; // 0: overview, 1: text, 2: saved alert evidence.
+uint8_t viewMode = 0; // 0: overview, 1: text, 2: saved alert evidence, 3: sound settings.
+uint8_t soundLevel = 3; // 0: mute, 1: low, 2: medium, 3: high.
+bool settingsStorageReady = false;
+bool settingsSaveFailed = false;
 #if QZSS_LIFECYCLE_TEST
 int lifecycleStage = 0;
 #endif
@@ -84,9 +89,31 @@ constexpr uint8_t enableSfrbx[] = {
   0xb5, 0x62, 0x06, 0x8a, 0x09, 0x00, 0x01, 0x01, 0x00,
   0x00, 0x32, 0x02, 0x91, 0x20, 0x01, 0x81, 0x30
 };
-constexpr uint8_t alertVolume = 220;
+constexpr uint8_t soundVolumes[] = {0, 180, 200, 220};
+constexpr const char* soundLabels[] = {"消音", "小", "中", "大"};
 constexpr float alertToneHz = 4000.0f;
 constexpr uint32_t alertToneMs = 300;
+
+void applySoundLevel() {
+  M5.Speaker.setVolume(soundVolumes[soundLevel]);
+}
+void initSoundSettings() {
+  settingsStorageReady = settingsPrefs.begin("qzsscfg", false);
+  if (settingsStorageReady) {
+    const uint8_t saved = settingsPrefs.getUChar("sound", 3);
+    if (saved < 4) soundLevel = saved;
+  }
+  applySoundLevel();
+}
+void changeSoundLevel(int direction) {
+  const int next = static_cast<int>(soundLevel) + direction;
+  if (next < 0 || next > 3) return;
+  soundLevel = static_cast<uint8_t>(next);
+  applySoundLevel();
+  settingsSaveFailed = !settingsStorageReady ||
+    settingsPrefs.putUChar("sound", soundLevel) != sizeof(uint8_t);
+  dirty = true;
+}
 
 uint32_t bits(const uint8_t* data, int start, int length) {
   uint32_t result = 0;
@@ -315,7 +342,7 @@ bool considerAutomaticAlert(uint64_t id, bool newToHistory, bool fresh,
 void startAutomaticCue() {
   M5.Power.setVibration(110);
   vibrationEndsAt = millis() + 250;
-  M5.Speaker.tone(alertToneHz, alertToneMs);
+  if (soundLevel != 0) M5.Speaker.tone(alertToneHz, alertToneMs);
   automaticCueEndsAt = millis() + 5000;
   dirty = true;
 }
@@ -334,9 +361,9 @@ bool store(const uint8_t* data, const String& badge,
     dirty = true;
     return false;
   }
-  for (int i = 7; i > 0; --i) history[i] = history[i - 1];
+  for (int i = historyCapacity - 1; i > 0; --i) history[i] = history[i - 1];
   history[0] = {id, badge, title, body, ageStatus, millis()};
-  if (count < 8) ++count;
+  if (count < historyCapacity) ++count;
   selected = 0;
   dirty = true;
   return true;
@@ -371,7 +398,7 @@ void startManualCue() {
   // A+B long press is an explicit hardware self-test, never an actual alert.
   M5.Power.setVibration(110);
   vibrationEndsAt = millis() + 250;
-  M5.Speaker.tone(alertToneHz, alertToneMs);
+  if (soundLevel != 0) M5.Speaker.tone(alertToneHz, alertToneMs);
   manualTestEndsAt = millis() + 1500;
   dirty = true;
 }
@@ -550,9 +577,9 @@ String notificationStatus() {
       "自動通知待機";
   }
   if (automaticCueEndsAt && static_cast<int32_t>(automaticCueEndsAt - millis()) > 0)
-    status = "新規通報通知";
+    status = soundLevel == 0 ? "新規通報・消音（振動）" : "新規通報通知";
   if (manualTestEndsAt && static_cast<int32_t>(manualTestEndsAt - millis()) > 0)
-    status = "手動通知テスト";
+    status = soundLevel == 0 ? "手動通知テスト・消音" : "手動通知テスト";
   return status;
 }
 String bootStatus() {
@@ -712,6 +739,7 @@ void drawOverview() {
   }
   M5.Display.setTextSize(1);
   M5.Display.setTextColor(TFT_WHITE);
+  M5.Display.drawCenterString("通知音:" + String(soundLabels[soundLevel]), center, 365);
   M5.Display.drawCenterString(notificationStatus(), center, 433);
 }
 void drawEvidence() {
@@ -756,6 +784,22 @@ void drawEvidence() {
     M5.Display.drawCenterString("最新通知の診断保存に失敗", center, 365);
   M5.Display.drawCenterString("A+B短押し: 画面切替", center, 405);
 }
+void drawSoundSettings() {
+  const int center = M5.Display.width() / 2;
+  M5.Display.fillScreen(TFT_BLACK);
+  M5.Display.setTextColor(TFT_WHITE, TFT_BLACK);
+  M5.Display.setFont(&fonts::efontJA_16);
+  M5.Display.setTextSize(1);
+  M5.Display.drawCenterString("通知音の設定", center, 80);
+  M5.Display.setTextSize(2);
+  M5.Display.drawCenterString(soundLabels[soundLevel], center, 160);
+  M5.Display.setTextSize(1);
+  M5.Display.drawCenterString("A:小さく  B:大きく", center, 250);
+  M5.Display.drawCenterString("消音中も振動で通知", center, 290);
+  if (settingsSaveFailed || !settingsStorageReady)
+    M5.Display.drawCenterString("設定を保存できません", center, 342);
+  M5.Display.drawCenterString("A+B短押し: 画面切替", center, 405);
+}
 void draw() {
 #if QZSS_LIFECYCLE_TEST
   drawOverview();
@@ -764,6 +808,7 @@ void draw() {
 #endif
   if (viewMode == 1) drawTextView();
   else if (viewMode == 2) drawEvidence();
+  else if (viewMode == 3) drawSoundSettings();
   else drawOverview();
   dirty = false;
 }
@@ -891,7 +936,7 @@ void drawDecoderTest() {
 void setup() {
   M5.begin(M5.config());
   M5.Power.setVibration(0);
-  M5.Speaker.setVolume(alertVolume);
+  initSoundSettings();
 #if QZSS_DECODER_TEST
   dcr.SetYear(2026); // Year of the saved frame, normally supplied by GNSS RMC.
   for (int i = 3; i >= 0; --i)
@@ -965,7 +1010,7 @@ void loop() {
     }
   }
   if (buttonChord && !M5.BtnA.isPressed() && !M5.BtnB.isPressed()) {
-    if (!buttonChordLong) { viewMode = (viewMode + 1) % 3; dirty = true; }
+    if (!buttonChordLong) { viewMode = (viewMode + 1) % 4; dirty = true; }
     buttonChord = false; buttonChordLong = false; manualTestLatched = false;
   }
   if (hostReady && gnss.connected()) {
@@ -980,8 +1025,14 @@ void loop() {
       parse(static_cast<uint8_t>(value));
     }
   } else lastEnable = 0;
-  if (!buttonChord && M5.BtnA.wasPressed() && count) { selected = (selected + count - 1) % count; dirty = true; }
-  if (!buttonChord && M5.BtnB.wasPressed() && count) { selected = (selected + 1) % count; dirty = true; }
+  if (!buttonChord && M5.BtnA.wasPressed()) {
+    if (viewMode == 3) changeSoundLevel(-1);
+    else if (count) { selected = (selected + count - 1) % count; dirty = true; }
+  }
+  if (!buttonChord && M5.BtnB.wasPressed()) {
+    if (viewMode == 3) changeSoundLevel(1);
+    else if (count) { selected = (selected + 1) % count; dirty = true; }
+  }
   if (dirty || millis() - lastDraw >= 1000) { draw(); lastDraw = millis(); }
   delay(1);
 }
