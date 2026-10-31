@@ -4,7 +4,6 @@
 #include <QZQSM.h>
 #include <QZSSDCX.h>
 #include <Preferences.h>
-#include <esp_system.h>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -75,7 +74,6 @@ int lifecycleStage = 0;
 #endif
 bool buttonChord = false;
 bool buttonChordLong = false;
-esp_reset_reason_t bootResetReason = ESP_RST_UNKNOWN;
 String nmeaLine;
 int64_t utcAtRmc = 0;
 uint32_t msAtRmc = 0;
@@ -558,18 +556,7 @@ String notificationStatus() {
   return status;
 }
 String bootStatus() {
-  String reason;
-  switch (bootResetReason) {
-    case ESP_RST_POWERON: reason = "CPU電源投入"; break;
-    case ESP_RST_SW: reason = "ソフト再起動"; break;
-    case ESP_RST_PANIC:
-    case ESP_RST_INT_WDT:
-    case ESP_RST_TASK_WDT:
-    case ESP_RST_WDT:
-    case ESP_RST_BROWNOUT: reason = "異常後の起動"; break;
-    default: reason = "起動理由不明"; break;
-  }
-  return reason + " " + String(millis() / 60000) + "分";
+  return "起動後 " + String(millis() / 60000) + "分";
 }
 void drawTextView() {
   const int center = M5.Display.width() / 2;
@@ -651,12 +638,31 @@ void drawSatelliteIcon(int x, int y, uint16_t color) {
   M5.Display.drawLine(x + 4, y, x + 7, y, color);
   M5.Display.drawLine(x, y - 4, x + 4, y - 10, color);
 }
+void drawDishIcon(int x, int y, uint16_t color, bool waves, bool interrupted) {
+  // A compact antenna pictogram for the receiver-status band.
+  M5.Display.drawLine(x - 10, y - 8, x - 9, y - 3, color);
+  M5.Display.drawLine(x - 9, y - 3, x - 5, y + 2, color);
+  M5.Display.drawLine(x - 5, y + 2, x + 1, y + 5, color);
+  M5.Display.drawLine(x + 1, y + 5, x + 6, y + 5, color);
+  M5.Display.drawLine(x - 1, y + 4, x + 7, y - 6, color);
+  M5.Display.fillCircle(x + 7, y - 6, 2, color);
+  M5.Display.drawLine(x - 1, y + 5, x - 1, y + 12, color);
+  M5.Display.drawFastHLine(x - 7, y + 12, 13, color);
+  if (waves) {
+    M5.Display.drawLine(x + 11, y - 9, x + 15, y - 12, color);
+    M5.Display.drawLine(x + 12, y - 4, x + 17, y - 5, color);
+  }
+  if (interrupted) M5.Display.drawLine(x - 13, y + 11, x + 14, y - 13, color);
+}
 void drawOverview() {
   const int center = M5.Display.width() / 2;
   M5.Display.setFont(&fonts::efontJA_16);
   M5.Display.setTextSize(1);
   const String status = receiverStatus();
   const bool connected = status == "L1S受信中";
+  const bool receiverConnected = status == "GNSS受信中・L1S未受信" ||
+    status == "L1S受信途絶" || connected;
+  const bool interrupted = status == "GNSS受信途絶" || status == "L1S受信途絶";
   uint16_t background = connected ? 0x0841 : 0x1082;
   if (count) {
     const Entry& entry = history[selected];
@@ -670,9 +676,12 @@ void drawOverview() {
   M5.Display.drawCenterString(bootStatus(), center, 22);
   M5.Display.fillRoundRect(68, 49, 332, 44, 18, connected ? 0x03E0 : 0x4208);
   M5.Display.setTextColor(TFT_WHITE);
-  M5.Display.drawCenterString(status, center, 61);
+  drawDishIcon(101, 70, connected ? TFT_WHITE :
+               interrupted ? 0xBDF7 : receiverConnected ? 0x07FF : 0xBDF7,
+               connected, interrupted);
+  M5.Display.drawCenterString(status, center + 18, 61);
   if (!count) {
-    drawSatelliteIcon(center, 142, 0x07FF);
+    drawSatelliteIcon(center, 142, connected ? 0x07FF : 0x8410);
     M5.Display.setTextSize(2);
     M5.Display.drawCenterString("通報未確認", center, 185);
     M5.Display.setTextSize(1);
@@ -880,7 +889,6 @@ void drawDecoderTest() {
 }
 
 void setup() {
-  bootResetReason = esp_reset_reason();
   M5.begin(M5.config());
   M5.Power.setVibration(0);
   M5.Speaker.setVolume(alertVolume);
