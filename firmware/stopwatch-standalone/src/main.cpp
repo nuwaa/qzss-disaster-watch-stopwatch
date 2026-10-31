@@ -18,11 +18,17 @@
 #ifndef QZSS_LIFECYCLE_TEST
 #define QZSS_LIFECYCLE_TEST 0
 #endif
+#ifndef QZSS_DCX_TEST
+#define QZSS_DCX_TEST 0
+#endif
 #if QZSS_DECODER_TEST
 #include "comparison_fixtures.h"
 #endif
 #if QZSS_LIFECYCLE_TEST
 #include "lifecycle_fixtures.h"
+#endif
+#if QZSS_DCX_TEST
+#include "dcx_fixtures.h"
 #endif
 
 namespace {
@@ -59,7 +65,7 @@ bool evidenceStorageReady = false;
 bool evidenceAvailable = false;
 bool evidenceSaveFailed = false;
 bool evidenceReadFailed = false;
-struct Entry { uint64_t id; String badge, title, body, ageStatus; uint32_t receivedMs; };
+struct Entry { uint64_t id; String badge, title, body, ageStatus, group; uint32_t receivedMs; };
 constexpr int historyCapacity = 16;
 Entry history[historyCapacity];
 int count = 0, selected = 0;
@@ -76,6 +82,9 @@ bool settingsStorageReady = false;
 bool settingsSaveFailed = false;
 #if QZSS_LIFECYCLE_TEST
 int lifecycleStage = 0;
+#endif
+#if QZSS_DCX_TEST
+int dcxStage = 0;
 #endif
 bool buttonChord = false;
 bool buttonChordLong = false;
@@ -216,6 +225,25 @@ AgeResult ageForDcr(const uint8_t* data) {
   const String label = "発表から " + String(static_cast<int>(bestAge / 60)) + " 分";
   return {label, bestAge <= 180, static_cast<int32_t>(bestAge)};
 }
+AgeResult ageForDcx(const DCXMessage& report) {
+  // A6/A7 encode hazard onset, not issue time. Never label it as publication time.
+  if (!validClock()) return {"GNSS時刻未確認", false, -1};
+  if (report.a7_hazard_onset_ToW < 1 || report.a7_hazard_onset_ToW > 10080 ||
+      report.a6_hazard_onset_week_number > 1)
+    return {"発生時刻未指定", false, -1};
+  const int64_t now = utcAtRmc + (millis() - msAtRmc) / 1000;
+  const int64_t days = now / 86400;
+  const int weekday = static_cast<int>((days + 3) % 7); // Monday=0, 1970-01-01=Thursday.
+  const int64_t monday = (days - weekday) * 86400;
+  const int64_t onset = monday + report.a6_hazard_onset_week_number * 604800LL +
+    (report.a7_hazard_onset_ToW - 1) * 60LL;
+  const int64_t age = now - onset;
+  if (age < -180) return {"発生予定時刻は先", false, -1};
+  if (age > 900) return {"発生から15分超", false, -1};
+  return {age < 0 ? "発生予定まで " + String(static_cast<int>((-age + 59) / 60)) + " 分" :
+                      "発生から " + String(static_cast<int>(age / 60)) + " 分",
+          age >= -180 && age <= 180, static_cast<int32_t>(age)};
+}
 bool validCrc(const uint8_t* data) {
   // CRC-24Q over the first 226 bits, matching Azarashi's L1S decoder.
   uint32_t crc = 0;
@@ -229,6 +257,13 @@ bool validCrc(const uint8_t* data) {
 }
 uint64_t messageId(const uint8_t* data) {
   uint64_t hash = 14695981039346656037ULL;
+  if (bits(data, 8, 6) == 44) {
+    // Exclude satellite designation and CRC: the same DCX from another QZS
+    // must not become a new alert merely because those transport bits differ.
+    for (int i = 3; i < 28; ++i) { hash ^= data[i]; hash *= 1099511628211ULL; }
+    hash ^= data[28] & 0xc0; hash *= 1099511628211ULL;
+    return hash;
+  }
   for (int i = 0; i < 32; ++i) { hash ^= data[i]; hash *= 1099511628211ULL; }
   return hash;
 }
@@ -242,11 +277,15 @@ uint32_t evidenceChecksum(const AlertEvidence& evidence) {
   return hash;
 }
 bool validEvidence(const AlertEvidence& evidence) {
-  return evidence.magic == evidenceMagic && evidence.version == 1 &&
+  const bool dcrEvidence = evidence.version == 1 &&
+    evidence.classification >= 1 && evidence.classification <= 3 &&
+    evidence.issue == 0 && evidence.ageSeconds >= 0 && evidence.ageSeconds <= 180;
+  const bool dcxEvidence = evidence.version == 2 &&
+    evidence.classification == 44 && (evidence.issue == 1 || evidence.issue == 2) &&
+    evidence.ageSeconds >= -180 && evidence.ageSeconds <= 180;
+  return evidence.magic == evidenceMagic && (dcrEvidence || dcxEvidence) &&
          evidence.source == (QZSS_NOTIFICATION_TEST ? 2 : 1) &&
-         evidence.classification >= 1 && evidence.classification <= 3 &&
-         evidence.issue == 0 && evidence.ageSeconds >= 0 &&
-         evidence.ageSeconds <= 180 &&
+         (evidence.source != 2 || dcrEvidence) &&
          (evidence.source == 2 || evidence.receivedUtc > 0) &&
          evidence.checksum == evidenceChecksum(evidence) &&
          evidence.id == messageId(evidence.l1s);
@@ -266,11 +305,11 @@ void initEvidenceStorage() {
   } else evidenceReadFailed = true;
 }
 bool saveAlertEvidence(const uint8_t* l1s, int32_t ageSeconds, int64_t receivedUtc,
-                       uint8_t classification, uint8_t issue) {
+                       uint8_t classification, uint8_t issue, uint8_t mt = 43) {
   if (!evidenceStorageReady) { evidenceSaveFailed = true; return false; }
   AlertEvidence candidate = {};
   candidate.magic = evidenceMagic;
-  candidate.version = 1;
+  candidate.version = mt == 44 ? 2 : 1;
   candidate.classification = classification;
   candidate.issue = issue;
   candidate.source = QZSS_NOTIFICATION_TEST ? 2 : 1;
@@ -347,13 +386,15 @@ void startAutomaticCue() {
   dirty = true;
 }
 bool store(const uint8_t* data, const String& badge,
-           const String& title, const String& body, const String& ageStatus) {
+           const String& title, const String& body, const String& ageStatus,
+           const String& group = "") {
   const uint64_t id = messageId(data);
   for (int i = 0; i < count; ++i) if (history[i].id == id) {
     // A still-transmitted report may follow another event's cancellation.
     // Refresh its display without treating the repeated frame as a new alert.
     history[i].receivedMs = millis();
-    if (history[i].badge.indexOf("過去の受信情報") >= 0 &&
+    if (history[i].group.isEmpty() &&
+        history[i].badge.indexOf("過去の受信情報") >= 0 &&
         badge.indexOf("取消") < 0) {
       history[i].badge = badge;
       selected = i;
@@ -362,7 +403,7 @@ bool store(const uint8_t* data, const String& badge,
     return false;
   }
   for (int i = historyCapacity - 1; i > 0; --i) history[i] = history[i - 1];
-  history[0] = {id, badge, title, body, ageStatus, millis()};
+  history[0] = {id, badge, title, body, ageStatus, group, millis()};
   if (count < historyCapacity) ++count;
   selected = 0;
   dirty = true;
@@ -393,6 +434,55 @@ void markEarlierReportsAsPast(const String& title) {
           history[i].badge.indexOf("試験") < 0)))
       history[i].badge = QZSS_LIFECYCLE_TEST ?
         "試験・過去の受信情報" : "過去の受信情報";
+}
+String dcxGroup(const DCXMessage& report) {
+  String group = String(QZSS_DCX_TEST || report.a1_message_type == 0 ? "test:" : "actual:") +
+    String(report.a2_country_region_name) + ":" +
+    String(report.a3_provider_identifier) + ":" +
+    String(report.a4_hazard_category_type);
+  if (report.dcx_msg_type == DCX_MSG_J_ALERT)
+    group += ":" + String(report.ex8_target_area_code_list_type) + ":" +
+      String(report.ex9_target_area_code_list[0], HEX) + ":" +
+      String(report.ex9_target_area_code_list[1], HEX);
+  else if (report.dcx_msg_type == DCX_MSG_L_ALERT || report.dcx_msg_type == DCX_MSG_MT_INFO)
+    group += ":" + String(report.ex1_target_area_code);
+  return group;
+}
+void markEarlierDcxAsPast(const String& group) {
+  // DCX has no guaranteed event identifier. Neutralize only matching provider,
+  // hazard and target-code group; do not claim that every event was cleared.
+  for (int i = 1; i < count; ++i)
+    if (history[i].group == group &&
+        history[i].badge.indexOf("過去の受信情報") < 0 &&
+        history[i].badge.indexOf("全解除") < 0)
+      history[i].badge = group.startsWith("test:") ?
+        "試験・過去の受信情報" : "過去の受信情報";
+}
+String dcxTarget(const DCXMessage& report) {
+  if (report.a2_country_region_name != 111)
+    return "国・地域コード " + String(report.a2_country_region_name);
+  if (report.dcx_msg_type == DCX_MSG_J_ALERT) {
+    if (report.ex8_target_area_code_list_type == 0) {
+      String names;
+      int total = 0;
+      for (int bit = 0; bit < 64; ++bit) {
+        if (!(report.ex9_target_area_code_list[bit / 32] &
+              (uint32_t(1) << (31 - bit % 32)))) continue;
+        ++total;
+        if (total <= 3) {
+          if (!names.isEmpty()) names += "、";
+          names += DCXDecoder::get_prefecture_name_ja(bit);
+        }
+      }
+      return total ? "対象: " + names + (total > 3 ? " ほか" : "") : "対象地域不明";
+    }
+    const uint16_t area = report.ex9_target_area_code_list[0] >> 16;
+    return area ? "対象市区町村コード: " + String(area) + " ほか" : "対象地域不明";
+  }
+  if (report.dcx_msg_type == DCX_MSG_L_ALERT || report.dcx_msg_type == DCX_MSG_MT_INFO)
+    return report.ex1_target_area_code ?
+      "対象市区町村コード: " + String(report.ex1_target_area_code) : "対象地域不明";
+  return "対象地域未確認";
 }
 void startManualCue() {
   // A+B long press is an explicit hardware self-test, never an actual alert.
@@ -456,15 +546,43 @@ void processSfrbx(const uint8_t* payload, uint16_t length) {
     }
   } else if (mt == 44) {
     if (!dcx.decode(message) || dcx.r.dcx_msg_type == DCX_MSG_NULL) return;
-    const String badge = dcx.r.a1_message_type == 0 ? "訓練・試験" : "衛星受信";
+    const uint8_t action = dcx.r.a1_message_type;
+    const String badge = QZSS_DCX_TEST ?
+      (action == 0 ? "試験・訓練" : action == 1 ? "試験・発表" :
+       action == 2 ? "試験・更新" : "試験・全解除") :
+      action == 0 ? "訓練・試験" :
+      action == 1 ? "発表・衛星受信" :
+      action == 2 ? "更新・衛星受信" : "全解除・衛星受信";
     const String title = dcx.r.dcx_msg_type == DCX_MSG_J_ALERT ? "Jアラート" :
-      dcx.r.dcx_msg_type == DCX_MSG_L_ALERT ? "Lアラート" : "拡張通報";
-    String body = DCXDecoder::get_hazard_category_and_type_ja(dcx.r.a4_hazard_category_type);
+      dcx.r.dcx_msg_type == DCX_MSG_L_ALERT ? "Lアラート" :
+      dcx.r.dcx_msg_type == DCX_MSG_MT_INFO ? "自治体通報" : "拡張通報";
+    const AgeResult onset = ageForDcx(dcx.r);
+    const String group = dcxGroup(dcx.r);
+    String body = dcxTarget(dcx.r);
+    body += "\n対象地域未照合\n";
+    body += DCXDecoder::get_hazard_category_and_type_ja(dcx.r.a4_hazard_category_type);
     body += "\n";
     body += DCXDecoder::get_severity_str_ja(dcx.r.a5_severity);
     body += "\n";
     body += DCXDecoder::get_guidance_instruction_library_ja(dcx.r.a11_guidance_to_react_library);
-    store(message, badge, title, body, "発表時刻未確認");
+    const bool newToHistory = store(message, badge, title, body, onset.label, group);
+    if (!newToHistory) return;
+    if (action == 2 || action == 3) markEarlierDcxAsPast(group);
+    // A6/A7 is onset, never publication time. Alert only for a near-now onset,
+    // stable GNSS UTC, a recognized Japanese provider, and a persisted new ID.
+    const bool knownJapaneseProvider = dcx.r.a2_country_region_name == 111 &&
+      (dcx.r.dcx_msg_type == DCX_MSG_J_ALERT ||
+       dcx.r.dcx_msg_type == DCX_MSG_L_ALERT ||
+       dcx.r.dcx_msg_type == DCX_MSG_MT_INFO);
+    const bool afterWarmup = firstStableClockMs && millis() - firstStableClockMs >= 60000;
+    if (!QZSS_DCX_TEST && (action == 1 || action == 2) &&
+        knownJapaneseProvider && onset.fresh &&
+        afterWarmup && alertStorageReady && rememberAlert(messageId(message))) {
+      history[0].badge = badge + "・通知済";
+      startAutomaticCue();
+      saveAlertEvidence(message, onset.seconds,
+        utcAtRmc + (millis() - msAtRmc) / 1000, 44, action, 44);
+    }
   }
 }
 
@@ -548,6 +666,9 @@ void drawOverviewBody(const String& body, int center) {
   }
 }
 String receiverStatus() {
+#if QZSS_DCX_TEST
+  return "DCX試験データ・非衛星";
+#endif
 #if QZSS_LIFECYCLE_TEST
   return "試験データ・非衛星";
 #endif
@@ -561,6 +682,10 @@ String receiverStatus() {
   return "L1S受信中";
 }
 String notificationStatus() {
+#if QZSS_DCX_TEST
+  static const char* stages[] = {"発表", "別衛星再送", "更新", "全解除", "解除再送", "試験"};
+  return "試験 " + String(dcxStage + 1) + "/6 " + stages[dcxStage];
+#endif
 #if QZSS_LIFECYCLE_TEST
   static const char* stages[] = {"発表", "同一再送", "別内容", "取消", "取消再送", "別内容継続"};
   return "試験 " + String(lifecycleStage + 1) + "/6 " + stages[lifecycleStage] + " A:次 B:投入";
@@ -604,8 +729,12 @@ void drawTextView() {
     M5.Display.drawCenterString(entry.title, center, 169);
     drawBody(entry.body, center, 207, M5.Display.width() * 3 / 4);
     M5.Display.drawCenterString(entry.ageStatus, center, 365);
+#if QZSS_DCX_TEST
+    M5.Display.drawCenterString(String(count) + "件  A:次 B:投入", center, 391);
+#else
     M5.Display.drawCenterString(String(selected + 1) + "/" + String(count) +
                                 "  A:前 B:次", center, 391);
+#endif
   }
   M5.Display.drawCenterString("受信 " + String(bytesSeen) + "B  L1S " +
                               String(l1sSeen), center, 411);
@@ -763,10 +892,15 @@ void drawEvidence() {
     snprintf(line, sizeof(line), "UTC秒 %lld",
       static_cast<long long>(lastEvidence.receivedUtc));
     M5.Display.drawCenterString(line, center, 130);
-    snprintf(line, sizeof(line), "発表から %ld秒 区分 %u 種別 %u",
-      static_cast<long>(lastEvidence.ageSeconds),
-      static_cast<unsigned>(lastEvidence.classification),
-      static_cast<unsigned>(lastEvidence.issue));
+    if (lastEvidence.version == 2)
+      snprintf(line, sizeof(line), "MT44 発生時刻差 %ld秒 A1=%u",
+        static_cast<long>(lastEvidence.ageSeconds),
+        static_cast<unsigned>(lastEvidence.issue));
+    else
+      snprintf(line, sizeof(line), "発表から %ld秒 区分 %u 種別 %u",
+        static_cast<long>(lastEvidence.ageSeconds),
+        static_cast<unsigned>(lastEvidence.classification),
+        static_cast<unsigned>(lastEvidence.issue));
     M5.Display.drawCenterString(line, center, 157);
     snprintf(line, sizeof(line), "ID %016llX",
       static_cast<unsigned long long>(lastEvidence.id));
@@ -801,6 +935,11 @@ void drawSoundSettings() {
   M5.Display.drawCenterString("A+B短押し: 画面切替", center, 405);
 }
 void draw() {
+#if QZSS_DCX_TEST
+  drawTextView();
+  dirty = false;
+  return;
+#endif
 #if QZSS_LIFECYCLE_TEST
   drawOverview();
   dirty = false;
@@ -936,6 +1075,11 @@ void drawDecoderTest() {
 void setup() {
   M5.begin(M5.config());
   M5.Power.setVibration(0);
+#if QZSS_DCX_TEST
+  M5.Speaker.setVolume(soundVolumes[3]);
+  draw();
+  return; // Synthetic frames only: no USB host, NVS, or alert output.
+#endif
   initSoundSettings();
 #if QZSS_DECODER_TEST
   dcr.SetYear(2026); // Year of the saved frame, normally supplied by GNSS RMC.
@@ -976,6 +1120,17 @@ void setup() {
   hostReady = serialReady && usb.begin();
 }
 void loop() {
+#if QZSS_DCX_TEST
+  M5.update();
+  if (M5.BtnA.wasPressed()) { dcxStage = (dcxStage + 1) % 6; dirty = true; }
+  if (M5.BtnB.wasPressed()) {
+    processSfrbx(dcxFrames[dcxStage], sizeof(dcxFrames[0]));
+    dirty = true;
+  }
+  if (dirty || millis() - lastDraw >= 1000) { draw(); lastDraw = millis(); }
+  delay(1);
+  return;
+#endif
 #if QZSS_DECODER_TEST
   M5.update();
   if (M5.BtnA.wasPressed() && count) { selected = (selected + count - 1) % count; drawDecoderTest(); }
