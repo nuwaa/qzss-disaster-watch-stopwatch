@@ -13,6 +13,7 @@
 - `firmware/stopwatch-gnss-probe/`: CH340経由でGNSSのNMEA/UBX受信数を画面で確認する試験版
 - `firmware/stopwatch-standalone/`: USBホスト受信とDCR/DCX日本語表示のPCなし試作版（受信・本文表示・通知待機を実機確認済み）
 - `docs/phase3-stopwatch-host.md`: BSHM2U105C1PBKを使う列挙試験と復旧手順
+- `docs/official-mt44-test-20261103.md`: 2026年11月3日の公式MT44試験に向けた記録・実機確認・抽出手順
 
 ## セットアップ
 

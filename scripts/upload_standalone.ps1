@@ -1,9 +1,9 @@
-param([string]$Port = 'COM10', [switch]$NotificationTest, [switch]$DecoderTest, [switch]$LifecycleTest, [switch]$DcxTest)
+param([string]$Port = 'COM10', [switch]$NotificationTest, [switch]$DecoderTest, [switch]$LifecycleTest, [switch]$DcxTest, [switch]$Capture, [switch]$CaptureTest)
 $ErrorActionPreference = 'Stop'
-if ((@($NotificationTest, $DecoderTest, $LifecycleTest, $DcxTest) | Where-Object { $_ }).Count -gt 1) { throw 'Choose only one test mode.' }
+if ((@($NotificationTest, $DecoderTest, $LifecycleTest, $DcxTest, $Capture, $CaptureTest) | Where-Object { $_ }).Count -gt 1) { throw 'Choose only one test mode.' }
 $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
-$pioEnv = if ($NotificationTest) { 'm5stack-stopwatch-notification-test' } elseif ($DecoderTest) { 'm5stack-stopwatch-decoder-test' } elseif ($LifecycleTest) { 'm5stack-stopwatch-lifecycle-test' } elseif ($DcxTest) { 'm5stack-stopwatch-dcx-test' } else { 'm5stack-stopwatch-standalone' }
+$pioEnv = if ($NotificationTest) { 'm5stack-stopwatch-notification-test' } elseif ($DecoderTest) { 'm5stack-stopwatch-decoder-test' } elseif ($LifecycleTest) { 'm5stack-stopwatch-lifecycle-test' } elseif ($DcxTest) { 'm5stack-stopwatch-dcx-test' } elseif ($Capture) { 'm5stack-stopwatch-capture' } elseif ($CaptureTest) { 'm5stack-stopwatch-capture-test' } else { 'm5stack-stopwatch-standalone' }
 if (-not (Test-Path -LiteralPath "firmware/stopwatch-standalone/.pio/build/$pioEnv/firmware.bin")) {
     throw 'Run scripts/build_standalone.ps1 first.'
 }

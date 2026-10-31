@@ -21,6 +21,12 @@
 #ifndef QZSS_DCX_TEST
 #define QZSS_DCX_TEST 0
 #endif
+#ifndef QZSS_CAPTURE
+#define QZSS_CAPTURE 0
+#endif
+#if QZSS_CAPTURE
+#include <LittleFS.h>
+#endif
 #if QZSS_DECODER_TEST
 #include "comparison_fixtures.h"
 #endif
@@ -80,6 +86,75 @@ uint8_t viewMode = 0; // 0: overview, 1: text, 2: saved alert evidence, 3: sound
 uint8_t soundLevel = 3; // 0: mute, 1: low, 2: medium, 3: high.
 bool settingsStorageReady = false;
 bool settingsSaveFailed = false;
+int64_t utcAtRmc = 0;
+uint32_t msAtRmc = 0;
+#if QZSS_CAPTURE
+bool validClock();
+bool captureReady = false;
+bool captureFailed = false;
+uint32_t capturedFrames = 0;
+uint32_t captureFileBytes = 0;
+uint8_t captureFile = 0;
+constexpr size_t captureFileLimit = 1500000;
+const char* capturePaths[] = {"/capture0.jsonl", "/capture1.jsonl"};
+
+void initCapture() {
+  // Never format automatically: a mount failure must preserve existing evidence.
+  captureReady = LittleFS.begin(false);
+  if (!captureReady) { captureFailed = true; return; }
+  const bool first = LittleFS.exists(capturePaths[0]);
+  const bool second = LittleFS.exists(capturePaths[1]);
+  if (first && second) {
+    File a = LittleFS.open(capturePaths[0], "r");
+    File b = LittleFS.open(capturePaths[1], "r");
+    const size_t sizeA = a.size(), sizeB = b.size();
+    a.close(); b.close();
+    // Resume the non-full file. If both are full, retain both until export.
+    captureFile = sizeA < captureFileLimit ? 0 : 1;
+    captureFileBytes = captureFile ? sizeB : sizeA;
+  } else {
+    captureFile = first ? 0 : second ? 1 : 0;
+    File file = LittleFS.open(capturePaths[captureFile], "a");
+    if (!file) { captureFailed = true; return; }
+    captureFileBytes = file.size(); file.close();
+  }
+}
+
+void captureFrame(const uint8_t* payload, uint16_t length, uint8_t mt, int decoded, int a1,
+                  int provider, int hazard, int target) {
+  if (!captureReady || captureFailed) return;
+  if (length > 64) { captureFailed = true; return; }
+  if (captureFileBytes >= captureFileLimit) {
+    if (captureFile == 0 && !LittleFS.exists(capturePaths[1])) {
+      captureFile = 1; captureFileBytes = 0;
+    } else { captureFailed = true; return; }
+  }
+  File file = LittleFS.open(capturePaths[captureFile], "a");
+  if (!file) { captureFailed = true; return; }
+  const int64_t observedUtc = validClock() ?
+    utcAtRmc + (millis() - msAtRmc) / 1000 : 0;
+  char head[160];
+  const int headLen = snprintf(head, sizeof(head),
+    "{\"source\":\"%s\",\"ms\":%lu,\"utc\":%lld,\"mt\":%u,\"decoded\":%d,\"a1\":%d,\"provider\":%d,\"hazard\":%d,\"target\":%d,\"sfrbx\":\"",
+    QZSS_DCX_TEST ? "synthetic" : "satellite",
+    static_cast<unsigned long>(millis()), static_cast<long long>(observedUtc),
+    static_cast<unsigned>(mt), decoded, a1, provider, hazard, target);
+  if (headLen <= 0 || headLen >= static_cast<int>(sizeof(head)) ||
+      file.write(reinterpret_cast<const uint8_t*>(head), headLen) != static_cast<size_t>(headLen)) {
+    captureFailed = true; file.close(); return;
+  }
+  static const char hex[] = "0123456789abcdef";
+  char raw[128];
+  for (int i = 0; i < length; ++i) {
+    raw[2*i] = hex[payload[i] >> 4]; raw[2*i+1] = hex[payload[i] & 15];
+  }
+  if (file.write(reinterpret_cast<const uint8_t*>(raw), 2 * length) != 2 * length ||
+      file.print("\"}\n") != 3) captureFailed = true;
+  file.close();
+  captureFileBytes += headLen + 2 * length + 3;
+  ++capturedFrames;
+}
+#endif
 #if QZSS_LIFECYCLE_TEST
 int lifecycleStage = 0;
 #endif
@@ -89,8 +164,6 @@ int dcxStage = 0;
 bool buttonChord = false;
 bool buttonChordLong = false;
 String nmeaLine;
-int64_t utcAtRmc = 0;
-uint32_t msAtRmc = 0;
 int utcYear = 0;
 uint8_t consistentRmcCount = 0;
 uint32_t firstStableClockMs = 0;
@@ -505,6 +578,10 @@ void processSfrbx(const uint8_t* payload, uint16_t length) {
   lastValidL1s = millis();
   const uint8_t mt = bits(message, 8, 6);
   if (mt == 43) {
+#if QZSS_CAPTURE
+    captureFrame(payload, length, mt, bits(message, 214, 6) == 1 ? 1 : 0,
+                 -1, -1, bits(message, 17, 4), -1);
+#endif
     if (bits(message, 214, 6) != 1) return;
     const uint8_t classification = bits(message, 14, 3);
     dcr.Decode(message);
@@ -545,7 +622,16 @@ void processSfrbx(const uint8_t* payload, uint16_t length) {
         classification, informationType);
     }
   } else if (mt == 44) {
-    if (!dcx.decode(message) || dcx.r.dcx_msg_type == DCX_MSG_NULL) return;
+    const bool decoded = dcx.decode(message);
+    const bool hasContent = decoded && dcx.r.dcx_msg_type != DCX_MSG_NULL;
+#if QZSS_CAPTURE
+    captureFrame(payload, length, mt, hasContent ? 1 : 0,
+                 hasContent ? dcx.r.a1_message_type : -1,
+                 hasContent ? dcx.r.a3_provider_identifier : -1,
+                 hasContent ? dcx.r.a4_hazard_category_type : -1,
+                 hasContent ? dcx.r.ex1_target_area_code : -1);
+#endif
+    if (!hasContent) return;
     const uint8_t action = dcx.r.a1_message_type;
     const String badge = QZSS_DCX_TEST ?
       (action == 0 ? "試験・訓練" : action == 1 ? "試験・発表" :
@@ -869,6 +955,11 @@ void drawOverview() {
   M5.Display.setTextSize(1);
   M5.Display.setTextColor(TFT_WHITE);
   M5.Display.drawCenterString("通知音:" + String(soundLabels[soundLevel]), center, 365);
+#if QZSS_CAPTURE
+  M5.Display.drawCenterString(captureFailed ? "検証記録エラー" :
+    captureReady ? "検証記録中 " + String(capturedFrames) + "件" :
+    "検証記録未準備", center, 385);
+#endif
   M5.Display.drawCenterString(notificationStatus(), center, 433);
 }
 void drawEvidence() {
@@ -1076,6 +1167,9 @@ void setup() {
   M5.begin(M5.config());
   M5.Power.setVibration(0);
 #if QZSS_DCX_TEST
+#if QZSS_CAPTURE
+  initCapture();
+#endif
   M5.Speaker.setVolume(soundVolumes[3]);
   draw();
   return; // Synthetic frames only: no USB host, NVS, or alert output.
@@ -1095,6 +1189,9 @@ void setup() {
 #endif
   initAlertStorage();
   initEvidenceStorage();
+#if QZSS_CAPTURE
+  initCapture();
+#endif
 #if QZSS_NOTIFICATION_TEST
   testStage = alertLedger.ids[0] == testMessageId ? 3 : 0;
   drawNotificationTest();
