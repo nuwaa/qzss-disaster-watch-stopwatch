@@ -393,30 +393,96 @@ void drawTextView() {
                               String(l1sSeen), center, 411);
   M5.Display.drawCenterString(notificationStatus(), center, 438);
 }
+void drawStateIcon(int x, int y, bool test, bool old, bool notified, uint16_t color) {
+  if (test) { // Beaker: test data remains recognizable without color.
+    M5.Display.drawLine(x - 4, y - 8, x + 4, y - 8, color);
+    M5.Display.drawLine(x - 2, y - 8, x - 2, y - 1, color);
+    M5.Display.drawLine(x + 2, y - 8, x + 2, y - 1, color);
+    M5.Display.drawLine(x - 2, y - 1, x - 8, y + 8, color);
+    M5.Display.drawLine(x + 2, y - 1, x + 8, y + 8, color);
+    M5.Display.drawLine(x - 8, y + 8, x + 8, y + 8, color);
+  } else if (old) {
+    M5.Display.drawCircle(x, y, 9, color);
+    M5.Display.drawLine(x, y, x, y - 5, color);
+    M5.Display.drawLine(x, y, x + 4, y + 2, color);
+  } else {
+    M5.Display.drawTriangle(x, y - 10, x - 10, y + 9, x + 10, y + 9, color);
+    M5.Display.drawLine(x, y - 3, x, y + 3, color);
+    M5.Display.fillCircle(x, y + 6, 1, color);
+    if (notified) M5.Display.drawCircle(x, y, 13, color);
+  }
+}
+void drawCategoryIcon(const String& title, int x, int y, uint16_t color) {
+  if (title.indexOf("津波") >= 0 || title.indexOf("海上") >= 0) {
+    M5.Display.drawLine(x - 11, y + 2, x - 5, y - 2, color);
+    M5.Display.drawLine(x - 5, y - 2, x + 1, y + 2, color);
+    M5.Display.drawLine(x + 1, y + 2, x + 7, y - 2, color);
+    M5.Display.drawLine(x + 7, y - 2, x + 11, y + 1, color);
+    M5.Display.drawFastHLine(x - 11, y + 7, 22, color);
+  } else if (title.indexOf("地震") >= 0 || title.indexOf("震度") >= 0) {
+    M5.Display.drawLine(x - 11, y, x - 6, y, color);
+    M5.Display.drawLine(x - 6, y, x - 3, y - 8, color);
+    M5.Display.drawLine(x - 3, y - 8, x + 2, y + 8, color);
+    M5.Display.drawLine(x + 2, y + 8, x + 5, y, color);
+    M5.Display.drawLine(x + 5, y, x + 11, y, color);
+  } else if (title.indexOf("火山") >= 0 || title.indexOf("降灰") >= 0) {
+    M5.Display.drawTriangle(x - 11, y + 9, x, y - 8, x + 11, y + 9, color);
+    M5.Display.fillCircle(x - 2, y - 11, 1, color);
+    M5.Display.fillCircle(x + 4, y - 13, 1, color);
+  } else if (title.indexOf("台風") >= 0 || title.indexOf("気象") >= 0) {
+    M5.Display.drawCircle(x, y, 9, color);
+    M5.Display.fillCircle(x, y, 2, color);
+    M5.Display.drawLine(x - 11, y - 3, x - 4, y - 3, color);
+    M5.Display.drawLine(x + 4, y + 3, x + 11, y + 3, color);
+  } else {
+    M5.Display.drawCircle(x, y, 9, color);
+    M5.Display.fillCircle(x, y, 2, color);
+  }
+}
+void drawSatelliteIcon(int x, int y, uint16_t color) {
+  M5.Display.fillRect(x - 4, y - 4, 8, 8, color);
+  M5.Display.drawRect(x - 15, y - 6, 8, 12, color);
+  M5.Display.drawRect(x + 7, y - 6, 8, 12, color);
+  M5.Display.drawLine(x - 7, y, x - 4, y, color);
+  M5.Display.drawLine(x + 4, y, x + 7, y, color);
+  M5.Display.drawLine(x, y - 4, x + 4, y - 10, color);
+}
 void drawOverview() {
   const int center = M5.Display.width() / 2;
-  M5.Display.fillScreen(TFT_BLACK);
   M5.Display.setFont(&fonts::efontJA_16);
   M5.Display.setTextSize(1);
   const String status = receiverStatus();
   const bool connected = status == "衛星データ受信中";
+  uint16_t background = connected ? 0x0841 : 0x1082;
+  if (count) {
+    const Entry& entry = history[selected];
+    if (entry.badge.indexOf("訓練") >= 0 || entry.badge.indexOf("試験") >= 0)
+      background = 0x2100;
+    else if (entry.ageStatus.indexOf("古い") >= 0) background = 0x18C3;
+    else if (entry.badge.indexOf("通知済") >= 0) background = 0x2000;
+  }
+  M5.Display.fillScreen(background);
   M5.Display.fillRoundRect(68, 49, 332, 44, 18, connected ? 0x03E0 : 0x4208);
   M5.Display.setTextColor(TFT_WHITE);
   M5.Display.drawCenterString(status, center, 61);
   if (!count) {
+    drawSatelliteIcon(center, 142, 0x07FF);
     M5.Display.setTextSize(2);
-    M5.Display.drawCenterString("通報待ち", center, 175);
+    M5.Display.drawCenterString("通報待ち", center, 185);
     M5.Display.setTextSize(1);
     M5.Display.drawCenterString("新しい通報はありません", center, 252);
   } else {
     const Entry& entry = history[selected];
     const bool test = entry.badge.indexOf("訓練") >= 0 || entry.badge.indexOf("試験") >= 0;
     const bool old = entry.ageStatus.indexOf("古い") >= 0;
-    const uint16_t accent = test ? 0xFD20 : old ? 0x8410 : 0x07FF;
+    const bool notified = entry.badge.indexOf("通知済") >= 0;
+    const uint16_t accent = test ? 0xFD20 : old ? 0x8410 : notified ? 0xF800 : 0x07FF;
     M5.Display.fillRoundRect(55, 111, 358, 48, 16, accent);
-    M5.Display.setTextColor(TFT_BLACK);
+    M5.Display.setTextColor(old || notified ? TFT_WHITE : TFT_BLACK);
+    drawStateIcon(82, 135, test, old, notified, old || notified ? TFT_WHITE : TFT_BLACK);
     M5.Display.drawCenterString(entry.badge, center, 125);
     M5.Display.setTextColor(TFT_WHITE);
+    drawCategoryIcon(entry.title, 79, 190, accent);
     M5.Display.setTextSize(2);
     drawBody(entry.title, center, 174, 350, 1, 38);
     M5.Display.setTextSize(1);
