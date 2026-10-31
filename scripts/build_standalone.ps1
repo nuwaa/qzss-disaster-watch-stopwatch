@@ -1,6 +1,6 @@
-param([switch]$NotificationTest, [switch]$DecoderTest)
+param([switch]$NotificationTest, [switch]$DecoderTest, [switch]$LifecycleTest)
 $ErrorActionPreference = 'Stop'
-if ($NotificationTest -and $DecoderTest) { throw 'Choose only one test mode.' }
+if ((@($NotificationTest, $DecoderTest, $LifecycleTest) | Where-Object { $_ }).Count -gt 1) { throw 'Choose only one test mode.' }
 $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
 $drive = @('Z:', 'Y:', 'X:', 'W:') | Where-Object { -not (Test-Path ($_.ToString() + '\')) } | Select-Object -First 1
@@ -18,7 +18,7 @@ try {
     $env:TMP = $env:TEMP
     New-Item -ItemType Directory -Force $env:TEMP | Out-Null
     $ErrorActionPreference = 'Continue'
-    $pioEnv = if ($NotificationTest) { 'm5stack-stopwatch-notification-test' } elseif ($DecoderTest) { 'm5stack-stopwatch-decoder-test' } else { 'm5stack-stopwatch-standalone' }
+    $pioEnv = if ($NotificationTest) { 'm5stack-stopwatch-notification-test' } elseif ($DecoderTest) { 'm5stack-stopwatch-decoder-test' } elseif ($LifecycleTest) { 'm5stack-stopwatch-lifecycle-test' } else { 'm5stack-stopwatch-standalone' }
     python -m platformio run -d "$drive\firmware\stopwatch-standalone" -e $pioEnv 2>&1 | Tee-Object -FilePath "$drive\work\standalone-build.log"
     $buildCode = $LASTEXITCODE
     $ErrorActionPreference = 'Stop'

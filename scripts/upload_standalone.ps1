@@ -1,9 +1,9 @@
-param([string]$Port = 'COM10', [switch]$NotificationTest, [switch]$DecoderTest)
+param([string]$Port = 'COM10', [switch]$NotificationTest, [switch]$DecoderTest, [switch]$LifecycleTest)
 $ErrorActionPreference = 'Stop'
-if ($NotificationTest -and $DecoderTest) { throw 'Choose only one test mode.' }
+if ((@($NotificationTest, $DecoderTest, $LifecycleTest) | Where-Object { $_ }).Count -gt 1) { throw 'Choose only one test mode.' }
 $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
-$pioEnv = if ($NotificationTest) { 'm5stack-stopwatch-notification-test' } elseif ($DecoderTest) { 'm5stack-stopwatch-decoder-test' } else { 'm5stack-stopwatch-standalone' }
+$pioEnv = if ($NotificationTest) { 'm5stack-stopwatch-notification-test' } elseif ($DecoderTest) { 'm5stack-stopwatch-decoder-test' } elseif ($LifecycleTest) { 'm5stack-stopwatch-lifecycle-test' } else { 'm5stack-stopwatch-standalone' }
 if (-not (Test-Path -LiteralPath "firmware/stopwatch-standalone/.pio/build/$pioEnv/firmware.bin")) {
     throw 'Run scripts/build_standalone.ps1 first.'
 }

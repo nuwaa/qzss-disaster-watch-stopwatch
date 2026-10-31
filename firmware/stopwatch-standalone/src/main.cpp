@@ -16,8 +16,14 @@
 #ifndef QZSS_DECODER_TEST
 #define QZSS_DECODER_TEST 0
 #endif
+#ifndef QZSS_LIFECYCLE_TEST
+#define QZSS_LIFECYCLE_TEST 0
+#endif
 #if QZSS_DECODER_TEST
 #include "comparison_fixtures.h"
+#endif
+#if QZSS_LIFECYCLE_TEST
+#include "lifecycle_fixtures.h"
 #endif
 
 namespace {
@@ -57,13 +63,16 @@ struct Entry { uint64_t id; String badge, title, body, ageStatus; uint32_t recei
 Entry history[8];
 int count = 0, selected = 0;
 uint32_t bytesSeen = 0, l1sSeen = 0, crcFailures = 0;
-uint32_t lastDraw = 0, lastByte = 0, lastEnable = 0;
+uint32_t lastDraw = 0, lastByte = 0, lastValidL1s = 0, lastEnable = 0;
 bool ch340Seen = false, serialReady = false, hostReady = false, dirty = true;
 uint32_t vibrationEndsAt = 0;
 uint32_t manualTestEndsAt = 0;
 uint32_t automaticCueEndsAt = 0;
 bool manualTestLatched = false;
 uint8_t viewMode = 0; // 0: overview, 1: text, 2: saved alert evidence.
+#if QZSS_LIFECYCLE_TEST
+int lifecycleStage = 0;
+#endif
 bool buttonChord = false;
 bool buttonChordLong = false;
 esp_reset_reason_t bootResetReason = ESP_RST_UNKNOWN;
@@ -315,13 +324,50 @@ void startAutomaticCue() {
 bool store(const uint8_t* data, const String& badge,
            const String& title, const String& body, const String& ageStatus) {
   const uint64_t id = messageId(data);
-  for (int i = 0; i < count; ++i) if (history[i].id == id) return false;
+  for (int i = 0; i < count; ++i) if (history[i].id == id) {
+    // A still-transmitted report may follow another event's cancellation.
+    // Refresh its display without treating the repeated frame as a new alert.
+    history[i].receivedMs = millis();
+    if (history[i].badge.indexOf("過去の受信情報") >= 0 &&
+        badge.indexOf("取消") < 0) {
+      history[i].badge = badge;
+      selected = i;
+    }
+    dirty = true;
+    return false;
+  }
   for (int i = 7; i > 0; --i) history[i] = history[i - 1];
   history[0] = {id, badge, title, body, ageStatus, millis()};
   if (count < 8) ++count;
   selected = 0;
   dirty = true;
   return true;
+}
+bool pastEntry(const Entry& entry) {
+  return entry.badge.indexOf("過去の受信情報") >= 0 ||
+    (entry.title == "緊急地震速報" && entry.badge.indexOf("取消") < 0 &&
+     entry.badge.indexOf("訓練") < 0 && entry.badge.indexOf("試験") < 0 &&
+     millis() - entry.receivedMs > 300000);
+}
+bool hasOtherReportInCategory(const String& title, uint64_t id, bool test) {
+  for (int i = 0; i < count; ++i)
+    if (history[i].title == title && history[i].id != id &&
+        history[i].badge.indexOf("取消") < 0 &&
+        (history[i].badge.indexOf("試験") >= 0 ||
+         history[i].badge.indexOf("訓練") >= 0) == test)
+      return true;
+  return false;
+}
+void markEarlierReportsAsPast(const String& title) {
+  // A DCR cancellation has no reliable identifier for a particular older entry.
+  // Neutralize only the same category; do not claim that every event was cancelled.
+  for (int i = 1; i < count; ++i)
+    if (history[i].title == title && history[i].badge.indexOf("取消") < 0 &&
+        (QZSS_LIFECYCLE_TEST ||
+         (history[i].badge.indexOf("訓練") < 0 &&
+          history[i].badge.indexOf("試験") < 0)))
+      history[i].badge = QZSS_LIFECYCLE_TEST ?
+        "試験・過去の受信情報" : "過去の受信情報";
 }
 void startManualCue() {
   // A+B long press is an explicit hardware self-test, never an actual alert.
@@ -341,6 +387,7 @@ void processSfrbx(const uint8_t* payload, uint16_t length) {
       message[i * 4 + b] = payload[8 + i * 4 + 3 - b];
   message[31] &= 0xc0;
   if (!validCrc(message)) { ++crcFailures; return; }
+  lastValidL1s = millis();
   const uint8_t mt = bits(message, 8, 6);
   if (mt == 43) {
     if (bits(message, 214, 6) != 1) return;
@@ -348,21 +395,39 @@ void processSfrbx(const uint8_t* payload, uint16_t length) {
     dcr.Decode(message);
     const String body = dcr.GetReport();
     if (body.isEmpty()) return;
-    const String badge = classification == 7 ? "訓練・試験" :
+    const uint8_t category = bits(message, 17, 4);
+    const uint8_t informationType = bits(message, 41, 2);
+    const bool cancellation = (category == 1 || category == 5) && informationType == 2;
+    const String title = dcrTitle(category);
+    const bool different = !cancellation && informationType == 0 &&
+      hasOtherReportInCategory(title, messageId(message),
+                               QZSS_LIFECYCLE_TEST || classification == 7);
+    const String badge = QZSS_LIFECYCLE_TEST ?
+      (cancellation ? "試験・取消" : different ? "試験・別内容" : "試験・発表") :
+      classification == 7 ?
+      (cancellation ? "訓練・試験・取消" : different ? "訓練・別内容" : "訓練・試験") :
+      cancellation ? "取消・衛星受信" :
+      informationType == 1 ? (category == 1 || category == 5 ?
+        "種別未定義" : "訂正・衛星受信") :
+      informationType == 3 ? "種別未定義" :
+      different ? "発表・別内容" :
       classification >= 1 && classification <= 3 ? "衛星受信" : "区分不明";
     const AgeResult age = ageForDcr(message);
     const int64_t observedUtc = age.fresh ?
       utcAtRmc + (millis() - msAtRmc) / 1000 : 0;
-    const bool newToHistory = store(message, badge, dcrTitle(bits(message, 17, 4)), body, age.label);
+    const bool newToHistory = store(message, badge, title, body, age.label);
+    if (newToHistory && cancellation && (QZSS_LIFECYCLE_TEST ||
+        (classification >= 1 && classification <= 3 && age.seconds >= 0 &&
+         age.seconds <= 300))) markEarlierReportsAsPast(title);
     // Only a newly decoded DCR issue with a stable UTC clock can be considered.
     // Persist its identity before any output; the first minute after clock lock is silent.
     const bool afterWarmup = firstStableClockMs && millis() - firstStableClockMs >= 60000;
     if (considerAutomaticAlert(messageId(message), newToHistory, age.fresh,
-                               classification, bits(message, 41, 2), afterWarmup)) {
+                               classification, informationType, afterWarmup)) {
       history[0].badge = "衛星受信・通知済";
       startAutomaticCue();
       saveAlertEvidence(message, age.seconds, observedUtc,
-        classification, bits(message, 41, 2));
+        classification, informationType);
     }
   } else if (mt == 44) {
     if (!dcx.decode(message) || dcx.r.dcx_msg_type == DCX_MSG_NULL) return;
@@ -458,13 +523,26 @@ void drawOverviewBody(const String& body, int center) {
   }
 }
 String receiverStatus() {
-  return !serialReady ? "CH340準備失敗" : !hostReady ?
-    "USBホスト開始失敗" : !ch340Seen ? "GNSS接続待ち" :
-    !lastByte || millis() - lastByte > 15000 ? "GNSS未受信" : "衛星データ受信中";
+#if QZSS_LIFECYCLE_TEST
+  return "試験データ・非衛星";
+#endif
+  if (!serialReady) return "CH340準備失敗";
+  if (!hostReady) return "USBホスト開始失敗";
+  if (!ch340Seen || !gnss.connected()) return "GNSS接続待ち";
+  if (!lastByte) return "GNSSデータ未受信";
+  if (millis() - lastByte > 15000) return "GNSS受信途絶";
+  if (!lastValidL1s) return "GNSS受信中・L1S未受信";
+  if (millis() - lastValidL1s > 30000) return "L1S受信途絶";
+  return "L1S受信中";
 }
 String notificationStatus() {
+#if QZSS_LIFECYCLE_TEST
+  static const char* stages[] = {"発表", "同一再送", "別内容", "取消", "取消再送", "別内容継続"};
+  return "試験 " + String(lifecycleStage + 1) + "/6 " + stages[lifecycleStage] + " A:次 B:投入";
+#endif
   String status;
   if (!alertStorageReady) status = "保存不可・通知無効";
+  else if (receiverStatus() != "L1S受信中") status = "通知: L1S受信待ち";
   else if (!validClock()) status = "通知: GNSS時刻待ち";
   else if (!firstStableClockMs) status = "通知: 準備中";
   else {
@@ -503,10 +581,12 @@ void drawTextView() {
   M5.Display.drawCenterString("QZSS 災危ウォッチ", center, 50);
   M5.Display.drawCenterString("研究・実験用", center, 76);
   M5.Display.drawCenterString(receiverStatus(), center, 105);
-  if (!count) M5.Display.drawCenterString("通報を待っています", center, 210);
+  if (!count) M5.Display.drawCenterString("通報未確認・受信状態を確認", center, 210);
   else {
     const Entry& entry = history[selected];
-    M5.Display.drawCenterString(entry.badge, center, 139);
+    M5.Display.drawCenterString(pastEntry(entry) ?
+      (QZSS_LIFECYCLE_TEST ? "試験・過去の受信情報" : "過去の受信情報") :
+      entry.badge, center, 139);
     M5.Display.drawCenterString(entry.title, center, 169);
     drawBody(entry.body, center, 207, M5.Display.width() * 3 / 4);
     M5.Display.drawCenterString(entry.ageStatus, center, 365);
@@ -576,13 +656,13 @@ void drawOverview() {
   M5.Display.setFont(&fonts::efontJA_16);
   M5.Display.setTextSize(1);
   const String status = receiverStatus();
-  const bool connected = status == "衛星データ受信中";
+  const bool connected = status == "L1S受信中";
   uint16_t background = connected ? 0x0841 : 0x1082;
   if (count) {
     const Entry& entry = history[selected];
     if (entry.badge.indexOf("訓練") >= 0 || entry.badge.indexOf("試験") >= 0)
       background = 0x2100;
-    else if (entry.ageStatus.indexOf("古い") >= 0) background = 0x18C3;
+    else if (pastEntry(entry) || entry.ageStatus.indexOf("古い") >= 0) background = 0x18C3;
     else if (entry.badge.indexOf("通知済") >= 0) background = 0x2000;
   }
   M5.Display.fillScreen(background);
@@ -594,19 +674,21 @@ void drawOverview() {
   if (!count) {
     drawSatelliteIcon(center, 142, 0x07FF);
     M5.Display.setTextSize(2);
-    M5.Display.drawCenterString("通報待ち", center, 185);
+    M5.Display.drawCenterString("通報未確認", center, 185);
     M5.Display.setTextSize(1);
-    M5.Display.drawCenterString("新しい通報はありません", center, 252);
+    M5.Display.drawCenterString("受信状態を確認してください", center, 252);
   } else {
     const Entry& entry = history[selected];
     const bool test = entry.badge.indexOf("訓練") >= 0 || entry.badge.indexOf("試験") >= 0;
-    const bool old = entry.ageStatus.indexOf("古い") >= 0;
+    const bool old = pastEntry(entry) || entry.ageStatus.indexOf("古い") >= 0;
     const bool notified = entry.badge.indexOf("通知済") >= 0;
     const uint16_t accent = test ? 0xFD20 : old ? 0x8410 : notified ? 0xF800 : 0x07FF;
     M5.Display.fillRoundRect(55, 111, 358, 48, 16, accent);
     M5.Display.setTextColor(old || notified ? TFT_WHITE : TFT_BLACK);
     drawStateIcon(82, 135, test, old, notified, old || notified ? TFT_WHITE : TFT_BLACK);
-    M5.Display.drawCenterString(entry.badge, center, 125);
+    M5.Display.drawCenterString(old && pastEntry(entry) ?
+      (QZSS_LIFECYCLE_TEST ? "試験・過去の受信情報" : "過去の受信情報") :
+      entry.badge, center, 125);
     M5.Display.setTextColor(TFT_WHITE);
     drawCategoryIcon(entry.title, 79, 190, accent);
     M5.Display.setTextSize(2);
@@ -666,6 +748,11 @@ void drawEvidence() {
   M5.Display.drawCenterString("A+B短押し: 画面切替", center, 405);
 }
 void draw() {
+#if QZSS_LIFECYCLE_TEST
+  drawOverview();
+  dirty = false;
+  return;
+#endif
   if (viewMode == 1) drawTextView();
   else if (viewMode == 2) drawEvidence();
   else drawOverview();
@@ -804,6 +891,11 @@ void setup() {
   drawDecoderTest();
   return;
 #endif
+#if QZSS_LIFECYCLE_TEST
+  dcr.SetYear(2026);
+  draw();
+  return; // No USB host and no NVS alert ledger in this isolated test mode.
+#endif
   initAlertStorage();
   initEvidenceStorage();
 #if QZSS_NOTIFICATION_TEST
@@ -818,6 +910,8 @@ void setup() {
   usb.onDeviceDisconnected([](const EspUsbHostDeviceInfo& device) {
     if (device.vid == 0x1a86 && device.pid == 0x7523) {
       ch340Seen = false;
+      lastByte = 0;
+      lastValidL1s = 0;
       consistentRmcCount = 0;
       firstStableClockMs = 0;
       utcYear = 0;
@@ -834,6 +928,17 @@ void loop() {
   if (M5.BtnA.wasPressed() && count) { selected = (selected + count - 1) % count; drawDecoderTest(); }
   if (M5.BtnB.wasPressed() && count) { selected = (selected + 1) % count; drawDecoderTest(); }
   delay(100);
+  return;
+#endif
+#if QZSS_LIFECYCLE_TEST
+  M5.update();
+  if (M5.BtnA.wasPressed()) { lifecycleStage = (lifecycleStage + 1) % 6; dirty = true; }
+  if (M5.BtnB.wasPressed()) {
+    processSfrbx(lifecycleFrames[lifecycleStage], sizeof(lifecycleFrames[0]));
+    dirty = true;
+  }
+  if (dirty || millis() - lastDraw >= 1000) { draw(); lastDraw = millis(); }
+  delay(1);
   return;
 #endif
 #if QZSS_NOTIFICATION_TEST
