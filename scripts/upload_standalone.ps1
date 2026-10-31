@@ -1,8 +1,9 @@
-param([string]$Port = 'COM10')
+param([string]$Port = 'COM10', [switch]$NotificationTest)
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
-if (-not (Test-Path -LiteralPath 'firmware/stopwatch-standalone/.pio/build/m5stack-stopwatch-standalone/firmware.bin')) {
+$pioEnv = if ($NotificationTest) { 'm5stack-stopwatch-notification-test' } else { 'm5stack-stopwatch-standalone' }
+if (-not (Test-Path -LiteralPath "firmware/stopwatch-standalone/.pio/build/$pioEnv/firmware.bin")) {
     throw 'Run scripts/build_standalone.ps1 first.'
 }
 python scripts/check_watch_port.py $Port
@@ -21,7 +22,7 @@ try {
     $env:TEMP = "$drive\work\tmp"
     $env:TMP = $env:TEMP
     $ErrorActionPreference = 'Continue'
-    python -m platformio run -d "$drive\firmware\stopwatch-standalone" -t upload --upload-port $Port 2>&1 | Tee-Object -FilePath "$drive\work\standalone-upload.log"
+    python -m platformio run -d "$drive\firmware\stopwatch-standalone" -e $pioEnv -t upload --upload-port $Port 2>&1 | Tee-Object -FilePath "$drive\work\standalone-upload.log"
     $uploadCode = $LASTEXITCODE
     $ErrorActionPreference = 'Stop'
     if ($uploadCode -ne 0) { throw "Upload failed with exit code $uploadCode" }

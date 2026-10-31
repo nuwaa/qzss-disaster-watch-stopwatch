@@ -1,3 +1,4 @@
+param([switch]$NotificationTest)
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
@@ -16,11 +17,12 @@ try {
     $env:TMP = $env:TEMP
     New-Item -ItemType Directory -Force $env:TEMP | Out-Null
     $ErrorActionPreference = 'Continue'
-    python -m platformio run -d "$drive\firmware\stopwatch-standalone" 2>&1 | Tee-Object -FilePath "$drive\work\standalone-build.log"
+    $pioEnv = if ($NotificationTest) { 'm5stack-stopwatch-notification-test' } else { 'm5stack-stopwatch-standalone' }
+    python -m platformio run -d "$drive\firmware\stopwatch-standalone" -e $pioEnv 2>&1 | Tee-Object -FilePath "$drive\work\standalone-build.log"
     $buildCode = $LASTEXITCODE
     $ErrorActionPreference = 'Stop'
     if ($buildCode -ne 0) { throw "Build failed with exit code $buildCode" }
-    Write-Host 'Standalone build succeeded.'
+    Write-Host "$pioEnv build succeeded."
 }
 finally {
     Set-Location $root

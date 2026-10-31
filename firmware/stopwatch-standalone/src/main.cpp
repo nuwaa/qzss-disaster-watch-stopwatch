@@ -7,6 +7,10 @@
 #include <cstdint>
 #include <cstdlib>
 
+#ifndef QZSS_NOTIFICATION_TEST
+#define QZSS_NOTIFICATION_TEST 0
+#endif
+
 namespace {
 EspUsbHost usb;
 EspUsbHostCdcSerial gnss(usb);
@@ -173,7 +177,8 @@ String dcrTitle(uint8_t category) {
   }
 }
 void initAlertStorage() {
-  if (!alertPrefs.begin("qzssalert", false)) return;
+  // The synthetic test build has its own NVS namespace.
+  if (!alertPrefs.begin(QZSS_NOTIFICATION_TEST ? "qzsstest" : "qzssalert", false)) return;
   const size_t storedSize = alertPrefs.getBytesLength("seen");
   if (storedSize == 0) {
     alertLedger.version = 1;
@@ -197,6 +202,13 @@ bool rememberAlert(uint64_t id) {
   alertStorageReady = false;
   dirty = true;
   return false;
+}
+bool considerAutomaticAlert(uint64_t id, bool newToHistory, bool fresh,
+                            uint8_t classification, uint8_t issue, bool afterWarmup) {
+  if (!newToHistory || !fresh || classification < 1 || classification > 3 || issue != 0)
+    return false;
+  // Remember even during warmup so a later repeat cannot become a new alert.
+  return rememberAlert(id) && afterWarmup;
 }
 void startAutomaticCue() {
   M5.Power.setVibration(110);
@@ -247,13 +259,11 @@ void processSfrbx(const uint8_t* payload, uint16_t length) {
     const bool newToHistory = store(message, badge, dcrTitle(bits(message, 17, 4)), body, age.label);
     // Only a newly decoded DCR issue with a stable UTC clock can be considered.
     // Persist its identity before any output; the first minute after clock lock is silent.
-    if (newToHistory && age.fresh && classification >= 1 && classification <= 3 &&
-        bits(message, 41, 2) == 0) {
-      const bool afterWarmup = firstStableClockMs && millis() - firstStableClockMs >= 60000;
-      if (rememberAlert(messageId(message)) && afterWarmup) {
-        history[0].badge = "衛星受信・通知済";
-        startAutomaticCue();
-      }
+    const bool afterWarmup = firstStableClockMs && millis() - firstStableClockMs >= 60000;
+    if (considerAutomaticAlert(messageId(message), newToHistory, age.fresh,
+                               classification, bits(message, 41, 2), afterWarmup)) {
+      history[0].badge = "衛星受信・通知済";
+      startAutomaticCue();
     }
   } else if (mt == 44) {
     if (!dcx.decode(message) || dcx.r.dcx_msg_type == DCX_MSG_NULL) return;
@@ -501,13 +511,87 @@ void draw() {
   if (textView) drawTextView(); else drawOverview();
   dirty = false;
 }
+#if QZSS_NOTIFICATION_TEST
+constexpr uint64_t testMessageId = 0x515a535354455354ULL;
+int testStage = 0;
+String testResult = "B: 試験を実行";
+bool testResetLatched = false;
+void drawNotificationTest() {
+  M5.Display.fillScreen(0x2100);
+  M5.Display.setFont(&fonts::efontJA_16);
+  M5.Display.setTextColor(TFT_WHITE);
+  M5.Display.setTextSize(1);
+  M5.Display.drawCenterString("通知試験モード", 234, 55);
+  M5.Display.drawCenterString("衛星通報ではありません", 234, 88);
+  M5.Display.drawFastHLine(80, 118, 308, TFT_WHITE);
+  M5.Display.setTextSize(1.5f);
+  static const char* labels[] = {
+    "1 訓練・試験", "2 古い通報", "3 新着DCR模擬", "4 重複・再起動"
+  };
+  M5.Display.drawCenterString(labels[testStage], 234, 166);
+  M5.Display.setTextSize(1);
+  M5.Display.drawCenterString(testResult, 234, 245);
+  M5.Display.drawCenterString(alertStorageReady ? "試験用の保存領域" : "保存不可・通知無効", 234, 301);
+  M5.Display.drawCenterString("A: 次  B: 実行", 234, 364);
+  M5.Display.drawCenterString("A+B 2秒: 試験履歴消去", 234, 396);
+}
+void runNotificationTest() {
+  if (!alertStorageReady) { testResult = "保存不可・通知無効"; return; }
+  if (testStage == 3 && alertLedger.ids[0] != testMessageId) {
+    testResult = "先に3を実行してください";
+    return;
+  }
+  const bool training = testStage == 0;
+  const bool stale = testStage == 1;
+  const bool cue = considerAutomaticAlert(testMessageId, true, !stale,
+    training ? 7 : 1, 0, true);
+  if (cue) startAutomaticCue();
+  testResult = cue ? "試験通知: 音・振動あり" : "試験通知: 音・振動なし";
+}
+void loopNotificationTest() {
+  M5.update();
+  if (vibrationEndsAt && static_cast<int32_t>(millis() - vibrationEndsAt) >= 0) {
+    M5.Power.setVibration(0);
+    vibrationEndsAt = 0;
+  }
+  const bool both = M5.BtnA.isPressed() && M5.BtnB.isPressed();
+  if (both && M5.BtnA.pressedFor(1800) && M5.BtnB.pressedFor(1800)) {
+    if (!testResetLatched) {
+      if (alertStorageReady && alertPrefs.clear()) {
+        alertLedger = {};
+        alertLedger.version = 1;
+        testStage = 0;
+        testResult = "試験履歴を消去";
+      } else testResult = "試験履歴の消去失敗";
+      testResetLatched = true;
+      dirty = true;
+    }
+  } else if (!both) testResetLatched = false;
+  if (!both && M5.BtnA.wasPressed()) {
+    testStage = (testStage + 1) % 4;
+    testResult = "B: 試験を実行";
+    dirty = true;
+  }
+  if (!both && M5.BtnB.wasPressed()) { runNotificationTest(); dirty = true; }
+  if (dirty || millis() - lastDraw >= 1000) {
+    drawNotificationTest(); dirty = false; lastDraw = millis();
+  }
+  delay(1);
+}
+#endif
 }
 
 void setup() {
-  M5.begin(M5.config()); draw();
+  M5.begin(M5.config());
   M5.Power.setVibration(0);
   M5.Speaker.setVolume(64);
   initAlertStorage();
+#if QZSS_NOTIFICATION_TEST
+  testStage = alertLedger.ids[0] == testMessageId ? 3 : 0;
+  drawNotificationTest();
+  return;
+#endif
+  draw();
   usb.onDeviceConnected([](const EspUsbHostDeviceInfo& device) {
     if (device.vid == 0x1a86 && device.pid == 0x7523) ch340Seen = true;
   });
@@ -525,6 +609,10 @@ void setup() {
   hostReady = serialReady && usb.begin();
 }
 void loop() {
+#if QZSS_NOTIFICATION_TEST
+  loopNotificationTest();
+  return;
+#endif
   M5.update();
   if (vibrationEndsAt && static_cast<int32_t>(millis() - vibrationEndsAt) >= 0) {
     M5.Power.setVibration(0);
