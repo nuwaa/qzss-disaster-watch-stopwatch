@@ -389,9 +389,9 @@ void drawOverview() {
     M5.Display.drawCenterString(entry.badge, center, 125);
     M5.Display.setTextColor(TFT_WHITE);
     M5.Display.setTextSize(2);
-    drawBody(entry.title, center, 174, 350, 2, 38);
+    drawBody(entry.title, center, 174, 350, 1, 38);
     M5.Display.setTextSize(1);
-    M5.Display.drawCenterString(entry.ageStatus, center, 225);
+    M5.Display.drawCenterString(entry.ageStatus, center, 208);
     M5.Display.drawFastHLine(80, 277, 308, 0x4208);
     M5.Display.setTextSize(2);
     drawBody(entry.body, center, 295, 350, 3, 42);
