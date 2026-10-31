@@ -324,6 +324,30 @@ void drawBody(const String& text, int center, int top, int width,
   for (int j = 0; j <= row && j < maxLines; ++j)
     M5.Display.drawCenterString(lines[j], center, top + j * lineHeight);
 }
+void drawOverviewBody(const String& body, int center) {
+  int start = 0, row = 0;
+  while (start < body.length() && row < 3) {
+    int end = body.indexOf('\n', start);
+    if (end < 0) end = body.length();
+    String line = body.substring(start, end);
+    line.trim();
+    start = end + 1;
+    if (line.isEmpty()) continue;
+    M5.Display.setTextSize(1.25f);
+    if (M5.Display.textWidth(line) > 380) M5.Display.setTextSize(1);
+    if (M5.Display.textWidth(line) > 380) {
+      const String ellipsis = "…";
+      while (line.length() && M5.Display.textWidth(line + ellipsis) > 380) {
+        int last = line.length() - 1;
+        while (last > 0 && (static_cast<uint8_t>(line[last]) & 0xc0) == 0x80) --last;
+        line.remove(last);
+      }
+      line += ellipsis;
+    }
+    M5.Display.drawCenterString(line, center, 247 + row * 23);
+    ++row;
+  }
+}
 String receiverStatus() {
   return !serialReady ? "CH340準備失敗" : !hostReady ?
     "USBホスト開始失敗" : !ch340Seen ? "GNSS接続待ち" :
@@ -397,9 +421,8 @@ void drawOverview() {
     drawBody(entry.title, center, 174, 350, 1, 38);
     M5.Display.setTextSize(1);
     M5.Display.drawCenterString(entry.ageStatus, center, 208);
-    M5.Display.drawFastHLine(80, 277, 308, 0x4208);
-    M5.Display.setTextSize(2);
-    drawBody(entry.body, center, 286, 350, 3, 34, true);
+    M5.Display.drawFastHLine(80, 237, 308, 0x4208);
+    drawOverviewBody(entry.body, center);
     M5.Display.setTextSize(1);
     M5.Display.drawCenterString(String(selected + 1) + "/" + String(count) +
                                 "  A:前 B:次", center, 405);
