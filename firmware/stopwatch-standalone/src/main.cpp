@@ -47,6 +47,7 @@ constexpr uint8_t enableSfrbx[] = {
   0xb5, 0x62, 0x06, 0x8a, 0x09, 0x00, 0x01, 0x01, 0x00,
   0x00, 0x32, 0x02, 0x91, 0x20, 0x01, 0x81, 0x30
 };
+constexpr uint8_t alertVolume = 160;
 
 uint32_t bits(const uint8_t* data, int start, int length) {
   uint32_t result = 0;
@@ -584,7 +585,7 @@ void loopNotificationTest() {
 void setup() {
   M5.begin(M5.config());
   M5.Power.setVibration(0);
-  M5.Speaker.setVolume(64);
+  M5.Speaker.setVolume(alertVolume);
   initAlertStorage();
 #if QZSS_NOTIFICATION_TEST
   testStage = alertLedger.ids[0] == testMessageId ? 3 : 0;
