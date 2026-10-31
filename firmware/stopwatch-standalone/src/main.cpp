@@ -5,7 +5,9 @@
 #include <QZSSDCX.h>
 #include <Preferences.h>
 #include <esp_system.h>
+#include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <cstdlib>
 
 #ifndef QZSS_NOTIFICATION_TEST
@@ -24,6 +26,7 @@ EspUsbHostCdcSerial gnss(usb);
 QZQSM dcr;
 DCXDecoder dcx;
 Preferences alertPrefs;
+Preferences evidencePrefs;
 struct AlertLedger {
   uint32_t version;
   uint32_t next;
@@ -31,6 +34,25 @@ struct AlertLedger {
 };
 AlertLedger alertLedger = {};
 bool alertStorageReady = false;
+struct __attribute__((packed)) AlertEvidence {
+  uint32_t magic;
+  uint8_t version;
+  uint8_t classification;
+  uint8_t issue;
+  uint8_t source;
+  int32_t ageSeconds;
+  int64_t receivedUtc;
+  uint64_t id;
+  uint8_t l1s[32];
+  uint32_t checksum;
+};
+static_assert(sizeof(AlertEvidence) == 64, "Unexpected alert evidence layout");
+constexpr uint32_t evidenceMagic = 0x515a4556;
+AlertEvidence lastEvidence = {};
+bool evidenceStorageReady = false;
+bool evidenceAvailable = false;
+bool evidenceSaveFailed = false;
+bool evidenceReadFailed = false;
 struct Entry { uint64_t id; String badge, title, body, ageStatus; uint32_t receivedMs; };
 Entry history[8];
 int count = 0, selected = 0;
@@ -41,7 +63,7 @@ uint32_t vibrationEndsAt = 0;
 uint32_t manualTestEndsAt = 0;
 uint32_t automaticCueEndsAt = 0;
 bool manualTestLatched = false;
-bool textView = false;
+uint8_t viewMode = 0; // 0: overview, 1: text, 2: saved alert evidence.
 bool buttonChord = false;
 bool buttonChordLong = false;
 esp_reset_reason_t bootResetReason = ESP_RST_UNKNOWN;
@@ -141,12 +163,12 @@ void acceptNmeaByte(uint8_t value) {
     nmeaLine += static_cast<char>(value);
   else if (nmeaLine.length()) nmeaLine = "";
 }
-struct AgeResult { String label; bool fresh; };
+struct AgeResult { String label; bool fresh; int32_t seconds; };
 AgeResult ageForDcr(const uint8_t* data) {
-  if (!validClock()) return {"GNSS時刻未確認", false};
+  if (!validClock()) return {"GNSS時刻未確認", false, -1};
   const int month = bits(data, 21, 4), day = bits(data, 25, 5);
   const int hour = bits(data, 30, 5), minute = bits(data, 35, 6);
-  if (month < 1 || month > 12 || day < 1 || hour > 23 || minute > 59) return {"発表時刻不正", false};
+  if (month < 1 || month > 12 || day < 1 || hour > 23 || minute > 59) return {"発表時刻不正", false, -1};
   const int64_t now = utcAtRmc + (millis() - msAtRmc) / 1000;
   int64_t bestAge = INT64_MAX;
   for (int year = utcYear - 1; year <= utcYear + 1; ++year) {
@@ -154,11 +176,11 @@ AgeResult ageForDcr(const uint8_t* data) {
     const int64_t age = now - utcSeconds(year, month, day, hour, minute, 0);
     if (llabs(age) < llabs(bestAge)) bestAge = age;
   }
-  if (bestAge == INT64_MAX) return {"発表時刻不正", false};
-  if (bestAge < 0) return {"未来の発表時刻", false};
-  if (bestAge > 900) return {"古い通報", false};
+  if (bestAge == INT64_MAX) return {"発表時刻不正", false, -1};
+  if (bestAge < 0) return {"未来の発表時刻", false, -1};
+  if (bestAge > 900) return {"古い通報", false, -1};
   const String label = "発表から " + String(static_cast<int>(bestAge / 60)) + " 分";
-  return {label, bestAge <= 180};
+  return {label, bestAge <= 180, static_cast<int32_t>(bestAge)};
 }
 bool validCrc(const uint8_t* data) {
   // CRC-24Q over the first 226 bits, matching Azarashi's L1S decoder.
@@ -175,6 +197,68 @@ uint64_t messageId(const uint8_t* data) {
   uint64_t hash = 14695981039346656037ULL;
   for (int i = 0; i < 32; ++i) { hash ^= data[i]; hash *= 1099511628211ULL; }
   return hash;
+}
+uint32_t evidenceChecksum(const AlertEvidence& evidence) {
+  const auto* bytes = reinterpret_cast<const uint8_t*>(&evidence);
+  uint32_t hash = 2166136261UL;
+  for (size_t i = 0; i < offsetof(AlertEvidence, checksum); ++i) {
+    hash ^= bytes[i];
+    hash *= 16777619UL;
+  }
+  return hash;
+}
+bool validEvidence(const AlertEvidence& evidence) {
+  return evidence.magic == evidenceMagic && evidence.version == 1 &&
+         evidence.source == (QZSS_NOTIFICATION_TEST ? 2 : 1) &&
+         evidence.classification >= 1 && evidence.classification <= 3 &&
+         evidence.issue == 0 && evidence.ageSeconds >= 0 &&
+         evidence.ageSeconds <= 180 &&
+         (evidence.source == 2 || evidence.receivedUtc > 0) &&
+         evidence.checksum == evidenceChecksum(evidence) &&
+         evidence.id == messageId(evidence.l1s);
+}
+void initEvidenceStorage() {
+  evidenceStorageReady = evidencePrefs.begin(
+    QZSS_NOTIFICATION_TEST ? "qzssdiagt" : "qzssdiag", false);
+  if (!evidenceStorageReady) return;
+  const size_t storedSize = evidencePrefs.getBytesLength("last");
+  if (!storedSize) return;
+  if (storedSize != sizeof(lastEvidence)) { evidenceReadFailed = true; return; }
+  AlertEvidence loaded = {};
+  if (evidencePrefs.getBytes("last", &loaded, sizeof(loaded)) == sizeof(loaded) &&
+      validEvidence(loaded)) {
+    lastEvidence = loaded;
+    evidenceAvailable = true;
+  } else evidenceReadFailed = true;
+}
+bool saveAlertEvidence(const uint8_t* l1s, int32_t ageSeconds, int64_t receivedUtc,
+                       uint8_t classification, uint8_t issue) {
+  if (!evidenceStorageReady) { evidenceSaveFailed = true; return false; }
+  AlertEvidence candidate = {};
+  candidate.magic = evidenceMagic;
+  candidate.version = 1;
+  candidate.classification = classification;
+  candidate.issue = issue;
+  candidate.source = QZSS_NOTIFICATION_TEST ? 2 : 1;
+  candidate.ageSeconds = ageSeconds;
+  candidate.receivedUtc = receivedUtc;
+  candidate.id = messageId(l1s);
+  memcpy(candidate.l1s, l1s, sizeof(candidate.l1s));
+  candidate.checksum = evidenceChecksum(candidate);
+  AlertEvidence verified = {};
+  const bool saved = evidencePrefs.putBytes("last", &candidate, sizeof(candidate)) ==
+                       sizeof(candidate) &&
+                     evidencePrefs.getBytes("last", &verified, sizeof(verified)) ==
+                       sizeof(verified) && validEvidence(verified) &&
+                     memcmp(&candidate, &verified, sizeof(candidate)) == 0;
+  evidenceSaveFailed = !saved;
+  if (saved) {
+    lastEvidence = verified;
+    evidenceAvailable = true;
+    evidenceReadFailed = false;
+  }
+  dirty = true;
+  return saved;
 }
 String dcrTitle(uint8_t category) {
   switch (category) {
@@ -267,6 +351,8 @@ void processSfrbx(const uint8_t* payload, uint16_t length) {
     const String badge = classification == 7 ? "訓練・試験" :
       classification >= 1 && classification <= 3 ? "衛星受信" : "区分不明";
     const AgeResult age = ageForDcr(message);
+    const int64_t observedUtc = age.fresh ?
+      utcAtRmc + (millis() - msAtRmc) / 1000 : 0;
     const bool newToHistory = store(message, badge, dcrTitle(bits(message, 17, 4)), body, age.label);
     // Only a newly decoded DCR issue with a stable UTC clock can be considered.
     // Persist its identity before any output; the first minute after clock lock is silent.
@@ -275,6 +361,8 @@ void processSfrbx(const uint8_t* payload, uint16_t length) {
                                classification, bits(message, 41, 2), afterWarmup)) {
       history[0].badge = "衛星受信・通知済";
       startAutomaticCue();
+      saveAlertEvidence(message, age.seconds, observedUtc,
+        classification, bits(message, 41, 2));
     }
   } else if (mt == 44) {
     if (!dcx.decode(message) || dcx.r.dcx_msg_type == DCX_MSG_NULL) return;
@@ -535,8 +623,52 @@ void drawOverview() {
   M5.Display.setTextColor(TFT_WHITE);
   M5.Display.drawCenterString(notificationStatus(), center, 433);
 }
+void drawEvidence() {
+  const int center = M5.Display.width() / 2;
+  M5.Display.fillScreen(TFT_BLACK);
+  M5.Display.setTextColor(TFT_WHITE, TFT_BLACK);
+  M5.Display.setFont(&fonts::efontJA_16);
+  M5.Display.setTextSize(1);
+  M5.Display.drawCenterString("自動通知の保存記録", center, 48);
+  M5.Display.drawCenterString("研究・実験用", center, 75);
+  if (!evidenceStorageReady)
+    M5.Display.drawCenterString("記録領域を開けません", center, 180);
+  else if (evidenceReadFailed)
+    M5.Display.drawCenterString("保存記録を検証できません", center, 180);
+  else if (!evidenceAvailable)
+    M5.Display.drawCenterString("通知記録はありません", center, 180);
+  else {
+    M5.Display.drawCenterString(lastEvidence.source == 2 ?
+      "試験データ・衛星通報ではありません" : "実衛星通報・通知指示", center, 103);
+    char line[48];
+    snprintf(line, sizeof(line), "UTC秒 %lld",
+      static_cast<long long>(lastEvidence.receivedUtc));
+    M5.Display.drawCenterString(line, center, 130);
+    snprintf(line, sizeof(line), "発表から %ld秒 区分 %u 種別 %u",
+      static_cast<long>(lastEvidence.ageSeconds),
+      static_cast<unsigned>(lastEvidence.classification),
+      static_cast<unsigned>(lastEvidence.issue));
+    M5.Display.drawCenterString(line, center, 157);
+    snprintf(line, sizeof(line), "ID %016llX",
+      static_cast<unsigned long long>(lastEvidence.id));
+    M5.Display.drawCenterString(line, center, 184);
+    M5.Display.drawCenterString("L1S 32バイト（16進数）", center, 219);
+    for (int row = 0; row < 4; ++row) {
+      char hex[17];
+      for (int column = 0; column < 8; ++column)
+        snprintf(hex + column * 2, 3, "%02X",
+          static_cast<unsigned>(lastEvidence.l1s[row * 8 + column]));
+      M5.Display.drawCenterString(hex, center, 247 + row * 25);
+    }
+  }
+  if (evidenceSaveFailed)
+    M5.Display.drawCenterString("最新通知の診断保存に失敗", center, 365);
+  M5.Display.drawCenterString("A+B短押し: 画面切替", center, 405);
+}
 void draw() {
-  if (textView) drawTextView(); else drawOverview();
+  if (viewMode == 1) drawTextView();
+  else if (viewMode == 2) drawEvidence();
+  else drawOverview();
   dirty = false;
 }
 #if QZSS_NOTIFICATION_TEST
@@ -560,6 +692,9 @@ void drawNotificationTest() {
   M5.Display.setTextSize(1);
   M5.Display.drawCenterString(testResult, 234, 245);
   M5.Display.drawCenterString(alertStorageReady ? "試験用の保存領域" : "保存不可・通知無効", 234, 301);
+  M5.Display.drawCenterString(evidenceSaveFailed ? "診断記録の保存失敗" :
+    evidenceReadFailed ? "診断記録の検証失敗" :
+    evidenceAvailable ? "診断記録あり（試験用）" : "診断記録なし", 234, 332);
   M5.Display.drawCenterString("A: 次  B: 実行", 234, 364);
   M5.Display.drawCenterString("A+B 2秒: 試験履歴消去", 234, 396);
 }
@@ -573,7 +708,14 @@ void runNotificationTest() {
   const bool stale = testStage == 1;
   const bool cue = considerAutomaticAlert(testMessageId, true, !stale,
     training ? 7 : 1, 0, true);
-  if (cue) startAutomaticCue();
+  if (cue) {
+    startAutomaticCue();
+    // Synthetic bytes are isolated from normal evidence and never labeled satellite data.
+    uint8_t synthetic[32] = {};
+    synthetic[0] = 0x51;
+    synthetic[1] = 0x5a;
+    saveAlertEvidence(synthetic, 60, 0, 1, 0);
+  }
   testResult = cue ? "試験通知: 音・振動あり" : "試験通知: 音・振動なし";
 }
 void loopNotificationTest() {
@@ -588,6 +730,12 @@ void loopNotificationTest() {
       if (alertStorageReady && alertPrefs.clear()) {
         alertLedger = {};
         alertLedger.version = 1;
+        if (evidenceStorageReady && evidencePrefs.clear()) {
+          lastEvidence = {};
+          evidenceAvailable = false;
+          evidenceSaveFailed = false;
+          evidenceReadFailed = false;
+        } else evidenceSaveFailed = true;
         testStage = 0;
         testResult = "試験履歴を消去";
       } else testResult = "試験履歴の消去失敗";
@@ -657,6 +805,7 @@ void setup() {
   return;
 #endif
   initAlertStorage();
+  initEvidenceStorage();
 #if QZSS_NOTIFICATION_TEST
   testStage = alertLedger.ids[0] == testMessageId ? 3 : 0;
   drawNotificationTest();
@@ -703,7 +852,7 @@ void loop() {
     }
   }
   if (buttonChord && !M5.BtnA.isPressed() && !M5.BtnB.isPressed()) {
-    if (!buttonChordLong) { textView = !textView; dirty = true; }
+    if (!buttonChordLong) { viewMode = (viewMode + 1) % 3; dirty = true; }
     buttonChord = false; buttonChordLong = false; manualTestLatched = false;
   }
   if (hostReady && gnss.connected()) {
