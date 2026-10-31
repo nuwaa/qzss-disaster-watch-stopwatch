@@ -47,7 +47,9 @@ constexpr uint8_t enableSfrbx[] = {
   0xb5, 0x62, 0x06, 0x8a, 0x09, 0x00, 0x01, 0x01, 0x00,
   0x00, 0x32, 0x02, 0x91, 0x20, 0x01, 0x81, 0x30
 };
-constexpr uint8_t alertVolume = 160;
+constexpr uint8_t alertVolume = 220;
+constexpr float alertToneHz = 4000.0f;
+constexpr uint32_t alertToneMs = 300;
 
 uint32_t bits(const uint8_t* data, int start, int length) {
   uint32_t result = 0;
@@ -214,7 +216,7 @@ bool considerAutomaticAlert(uint64_t id, bool newToHistory, bool fresh,
 void startAutomaticCue() {
   M5.Power.setVibration(110);
   vibrationEndsAt = millis() + 250;
-  M5.Speaker.tone(880, 180);
+  M5.Speaker.tone(alertToneHz, alertToneMs);
   automaticCueEndsAt = millis() + 5000;
   dirty = true;
 }
@@ -233,7 +235,7 @@ void startManualCue() {
   // A+B long press is an explicit hardware self-test, never an actual alert.
   M5.Power.setVibration(110);
   vibrationEndsAt = millis() + 250;
-  M5.Speaker.tone(880, 180);
+  M5.Speaker.tone(alertToneHz, alertToneMs);
   manualTestEndsAt = millis() + 1500;
   dirty = true;
 }
