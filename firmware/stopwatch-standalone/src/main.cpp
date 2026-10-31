@@ -4,6 +4,7 @@
 #include <QZQSM.h>
 #include <QZSSDCX.h>
 #include <Preferences.h>
+#include <esp_system.h>
 #include <cstdint>
 #include <cstdlib>
 
@@ -43,6 +44,7 @@ bool manualTestLatched = false;
 bool textView = false;
 bool buttonChord = false;
 bool buttonChordLong = false;
+esp_reset_reason_t bootResetReason = ESP_RST_UNKNOWN;
 String nmeaLine;
 int64_t utcAtRmc = 0;
 uint32_t msAtRmc = 0;
@@ -389,12 +391,27 @@ String notificationStatus() {
     status = "手動通知テスト";
   return status;
 }
+String bootStatus() {
+  String reason;
+  switch (bootResetReason) {
+    case ESP_RST_POWERON: reason = "CPU電源投入"; break;
+    case ESP_RST_SW: reason = "ソフト再起動"; break;
+    case ESP_RST_PANIC:
+    case ESP_RST_INT_WDT:
+    case ESP_RST_TASK_WDT:
+    case ESP_RST_WDT:
+    case ESP_RST_BROWNOUT: reason = "異常後の起動"; break;
+    default: reason = "起動理由不明"; break;
+  }
+  return reason + " " + String(millis() / 60000) + "分";
+}
 void drawTextView() {
   const int center = M5.Display.width() / 2;
   M5.Display.fillScreen(TFT_BLACK);
   M5.Display.setTextColor(TFT_WHITE, TFT_BLACK);
   M5.Display.setFont(&fonts::efontJA_16);
   M5.Display.setTextSize(1);
+  M5.Display.drawCenterString(bootStatus(), center, 24);
   M5.Display.drawCenterString("QZSS 災危ウォッチ", center, 50);
   M5.Display.drawCenterString("研究・実験用", center, 76);
   M5.Display.drawCenterString(receiverStatus(), center, 105);
@@ -481,6 +498,8 @@ void drawOverview() {
     else if (entry.badge.indexOf("通知済") >= 0) background = 0x2000;
   }
   M5.Display.fillScreen(background);
+  M5.Display.setTextColor(TFT_WHITE);
+  M5.Display.drawCenterString(bootStatus(), center, 22);
   M5.Display.fillRoundRect(68, 49, 332, 44, 18, connected ? 0x03E0 : 0x4208);
   M5.Display.setTextColor(TFT_WHITE);
   M5.Display.drawCenterString(status, center, 61);
@@ -626,6 +645,7 @@ void drawDecoderTest() {
 }
 
 void setup() {
+  bootResetReason = esp_reset_reason();
   M5.begin(M5.config());
   M5.Power.setVibration(0);
   M5.Speaker.setVolume(alertVolume);
