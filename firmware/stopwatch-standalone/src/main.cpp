@@ -14,7 +14,7 @@
 #define QZSS_DECODER_TEST 0
 #endif
 #if QZSS_DECODER_TEST
-#include "ash_fixture.h"
+#include "comparison_fixtures.h"
 #endif
 
 namespace {
@@ -601,9 +601,9 @@ void drawDecoderTest() {
     M5.Display.drawCenterString("復号できませんでした", 234, 190);
     return;
   }
-  M5.Display.drawCenterString(history[0].title, 234, 113);
+  M5.Display.drawCenterString(history[selected].title, 234, 113);
   int start = 0, row = 0;
-  const String& body = history[0].body;
+  const String& body = history[selected].body;
   while (start < body.length() && row < 10) {
     int end = body.indexOf('\n', start);
     if (end < 0) end = body.length();
@@ -619,7 +619,8 @@ void drawDecoderTest() {
     M5.Display.drawCenterString(line, 234, 145 + row * 24);
     ++row;
   }
-  M5.Display.drawCenterString("試験素材: 降灰 1件", 234, 423);
+  M5.Display.drawCenterString(String(selected + 1) + "/" + String(count) +
+                              "  A:前 B:次", 234, 423);
 }
 #endif
 }
@@ -630,7 +631,8 @@ void setup() {
   M5.Speaker.setVolume(alertVolume);
 #if QZSS_DECODER_TEST
   dcr.SetYear(2026); // Year of the saved frame, normally supplied by GNSS RMC.
-  for (uint8_t value : ashFixtureUbx) parse(value);
+  for (int i = 3; i >= 0; --i)
+    for (uint8_t value : comparisonFrames[i]) parse(value);
   drawDecoderTest();
   return;
 #endif
@@ -659,6 +661,9 @@ void setup() {
 }
 void loop() {
 #if QZSS_DECODER_TEST
+  M5.update();
+  if (M5.BtnA.wasPressed() && count) { selected = (selected + count - 1) % count; drawDecoderTest(); }
+  if (M5.BtnB.wasPressed() && count) { selected = (selected + 1) % count; drawDecoderTest(); }
   delay(100);
   return;
 #endif
