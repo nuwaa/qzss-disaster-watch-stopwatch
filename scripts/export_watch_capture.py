@@ -8,10 +8,11 @@ from pathlib import Path
 import time
 
 
-def read_exact(port, count: int, timeout: float = 120) -> bytes:
+def read_exact(port, count: int, timeout: float = 300) -> bytes:
     deadline = time.monotonic() + timeout
     chunks = []
     remaining = count
+    next_progress = 256_000
     while remaining:
         if time.monotonic() >= deadline:
             raise TimeoutError(f"USB capture stalled with {remaining} bytes remaining")
@@ -19,6 +20,10 @@ def read_exact(port, count: int, timeout: float = 120) -> bytes:
         if chunk:
             chunks.append(chunk)
             remaining -= len(chunk)
+            received = count - remaining
+            if received >= next_progress:
+                print(f"export progress: {received}/{count} bytes", flush=True)
+                next_progress += 256_000
     return b"".join(chunks)
 
 
@@ -41,9 +46,16 @@ def export(port, directory: Path) -> list[Path]:
     output = []
     port.write(b"DUMP\n")
     port.flush()
-    deadline = time.monotonic() + 180
+    deadline = time.monotonic() + 600
+    waiting_since = time.monotonic()
+    last_line = ""
     while time.monotonic() < deadline:
         line = port.readline().decode("ascii", errors="replace").strip()
+        if line:
+            last_line = line[:120]
+        if time.monotonic() - waiting_since > 30:
+            suffix = f" (last device line: {last_line})" if last_line else " (no device response)"
+            raise TimeoutError("StopWatch did not start or continue the capture export" + suffix)
         if line == "LOG_DONE":
             return output
         if line.startswith("LOG_ERROR "):
@@ -56,6 +68,7 @@ def export(port, directory: Path) -> list[Path]:
         size = int(size_text)
         if size < 0 or size > 1_600_000:
             raise ValueError(f"invalid capture size: {size}")
+        print(f"exporting capture {number}: {size} bytes", flush=True)
         data = read_exact(port, size)
         ending = port.readline().decode("ascii", errors="replace").strip()
         if ending != f"LOG_END {number}":
@@ -64,7 +77,9 @@ def export(port, directory: Path) -> list[Path]:
         with path.open("xb") as saved:
             saved.write(data)
         output.append(path)
-    raise TimeoutError("StopWatch did not finish the capture export")
+        waiting_since = time.monotonic()
+    suffix = f" (last device line: {last_line})" if last_line else " (no device response)"
+    raise TimeoutError("StopWatch did not finish the capture export" + suffix)
 
 
 def summarize(paths: list[Path]) -> int:
@@ -126,7 +141,7 @@ def main() -> int:
     port.rts = False
     port.port = args.port
     with port:
-        time.sleep(2)  # USB CDC may reset when opened.
+        time.sleep(5)  # USB CDC may reset when opened; wait for setup to finish.
         if args.initialize:
             command_ack(port, "INIT", "LOG_INIT_OK")
             print("capture partition ready")
